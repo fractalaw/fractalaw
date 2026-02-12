@@ -1326,7 +1326,34 @@ All cryptographic dependencies are **pure Rust or Rust+ASM** — no C OpenSSL li
 
 ---
 
-## 9. Research Sources
+## 9. Future Optimisations (Parking Lot)
+
+Ideas identified during external review that align with the architecture but are not in scope for current phases. Each has a corresponding GitHub issue for tracking.
+
+### 9.1 Bitmask Feature Flags for Fast Pre-Filtering
+
+Add a 64-bit integer column to the LRT encoding section-level characteristics as bitwise flags (e.g., *Bit 0: contains chemical thresholds; Bit 1: mentions waste disposal; Bit 2: references noise limits*). Enables microsecond pre-filtering of the legislation corpus using bitwise AND/OR before expensive semantic search or LLM inference. DuckDB's vectorised execution makes bitwise scans over 19K+ rows nearly free.
+
+**When**: Phase 2+ (query optimisation, after real query patterns emerge from Phase 1 validation)
+**Where**: LRT schema addition + DataFusion UDF for bitmask construction and querying
+
+### 9.2 Flat-Pack Compilation for Edge Devices
+
+Before syncing a legislation fractal to a constrained edge device (watch, drone, RPi), flatten the graph into a linear Arrow buffer — pre-resolving all `List<Struct>` relationships into a contiguous byte stream ordered by access pattern. The device's CPU never seeks for related data; it's physically the next byte in the stream. This is the logical extension of the "no pointer chasing" principle to the wire/sync layer.
+
+**When**: Phase 4 (distribution/sync), specifically when edge device constraints are characterised
+**Where**: Sync engine compilation step between Lance delta export and Arrow Flight transfer
+
+### 9.3 Pre-Tokenized Text Column in LAT
+
+Store a pre-tokenized representation of legal text alongside the raw `text` column in the LAT table. Avoids re-tokenizing on every embedding generation or inference pass. Format: token IDs from the target embedding model (e.g., all-MiniLM-L6-v2 vocabulary). Trades storage for compute — particularly valuable on edge devices where tokenization latency matters.
+
+**When**: Phase 2 (ONNX integration), when the embedding model is selected and the tokenizer is fixed
+**Where**: LAT schema addition (`token_ids: List<UInt32>`, `tokenizer_model: Utf8`)
+
+---
+
+## 10. Research Sources
 
 - [Fractal Computing — Architecture Overview](https://fractalweb.app)
 - [Fractal Locality Optimization Technology](https://fractalweb.app/Locality)
