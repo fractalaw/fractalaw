@@ -1351,6 +1351,27 @@ Store a pre-tokenized representation of legal text alongside the raw `text` colu
 **When**: Phase 2 (ONNX integration), when the embedding model is selected and the tokenizer is fixed
 **Where**: LAT schema addition (`token_ids: List<UInt32>`, `tokenizer_model: Utf8`)
 
+### 9.4 Evaluation Context Snapshots for Reproducible Compliance Checks
+
+When a compliance-checking micro-app runs, capture the exact evaluation state as a first-class, replayable entity: which law versions were active, which jurisdiction set applied, what input data was used, what the result was. Goes beyond audit logging (section 6.2.6) into full reproducibility — answering "why was this decision made at time X?" by replaying the exact same inputs against the exact same rule versions.
+
+**When**: Phase 3 (micro-app runtime) — the evaluation context is produced by micro-apps, not the data layer
+**Where**: New `evaluation_context` record type in the audit/compliance subsystem, referenced from audit log entries
+
+### 9.5 Structured Provenance Graph for AI Outputs
+
+For AI-generated outputs (classifications, compliance assessments, risk scores), capture a structured provenance graph — not just "model said X" in the audit log, but: input facts → model version → intermediate reasoning steps → output classification. Enables replay, verification, and the explainability the EU AI Act demands (Article 13). Each node in the graph is an auditable, versioned entity.
+
+**When**: Phase 2 (AI integration) and Phase 5 (EU AI Act conformity)
+**Where**: Extension to the audit log schema; provenance nodes stored alongside inference results in LanceDB
+
+### 9.6 Authority Precedence Model for Multi-Jurisdiction Conflict Resolution
+
+When laws from different authority levels conflict (EU directive vs UK transposition vs Scottish devolved legislation, or German federal vs Bundeslander), a formal hierarchy determines which prevails. The LRT schema stores laws and their territorial extent but doesn't model authority precedence. Relevant when multi-jurisdiction queries surface contradictory obligations from different levels of government.
+
+**When**: Phase 3+ (multi-jurisdiction, when real conflict cases emerge from data)
+**Where**: Authority hierarchy metadata in the LRT or a lightweight lookup table; conflict resolution logic in the compliance-checker micro-app
+
 ---
 
 ## 10. Research Sources
