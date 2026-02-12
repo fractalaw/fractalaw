@@ -23,7 +23,11 @@ pub mod esh {
     pub fn audit_log_schema() -> Schema {
         Schema::new(vec![
             Field::new("entry_id", DataType::UInt64, false),
-            Field::new("timestamp", DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, Some("UTC".into())), false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(arrow::datatypes::TimeUnit::Nanosecond, Some("UTC".into())),
+                false,
+            ),
             Field::new("node_id", DataType::Utf8, false),
             Field::new("actor_id", DataType::Utf8, false),
             Field::new("actor_role", DataType::Utf8, false),

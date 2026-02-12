@@ -1,7 +1,7 @@
 # Rust
 /target
 **/*.rs.bk
-Cargo.lock
+# Note: Cargo.lock IS tracked — this workspace has a binary crate (fractalaw-cli)
 
 # WASM build artifacts
 *.cwasm
@@ -10,6 +10,7 @@ Cargo.lock
 # IDE
 .idea/
 .vscode/
+.zed/
 *.swp
 *.swo
 
