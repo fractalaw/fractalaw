@@ -18,6 +18,9 @@
 .DS_Store
 Thumbs.db
 
+# Session docs (local working notes)
+/sessions/
+
 # Environment
 .env
 .env.local
