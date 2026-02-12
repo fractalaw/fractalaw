@@ -1,0 +1,17 @@
+[package]
+name = "fractalaw-cli"
+description = "CLI entry point for Fractalaw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fractalaw-core = { path = "../fractalaw-core" }
+fractalaw-store = { path = "../fractalaw-store" }
+fractalaw-host = { path = "../fractalaw-host" }
+fractalaw-sync = { path = "../fractalaw-sync" }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

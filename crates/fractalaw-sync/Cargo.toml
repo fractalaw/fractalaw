@@ -1,0 +1,33 @@
+[package]
+name = "fractalaw-sync"
+description = "Arrow Flight sync protocol, Lance delta sync, and Loro CRDT conflict resolution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fractalaw-core = { path = "../fractalaw-core" }
+arrow = { workspace = true }
+loro = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Arrow Flight requires tonic/prost which need protobuf — gated
+[dependencies.arrow-flight]
+workspace = true
+optional = true
+
+[dependencies.tonic]
+workspace = true
+optional = true
+
+[dependencies.prost]
+workspace = true
+optional = true
+
+[features]
+default = []
+flight = ["dep:arrow-flight", "dep:tonic", "dep:prost"]

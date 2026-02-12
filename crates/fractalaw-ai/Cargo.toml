@@ -1,0 +1,20 @@
+[package]
+name = "fractalaw-ai"
+description = "Local AI inference: ONNX Runtime embeddings/classification and LLM integration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+onnx = ["dep:ort"]
+
+[dependencies]
+fractalaw-core = { path = "../fractalaw-core" }
+arrow = { workspace = true }
+ort = { workspace = true, optional = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

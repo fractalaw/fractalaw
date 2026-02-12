@@ -1,0 +1,25 @@
+[package]
+name = "fractalaw-store"
+description = "DuckDB, LanceDB, and DataFusion integration for Fractalaw"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+duckdb = ["dep:duckdb"]
+lancedb = ["dep:lancedb"]
+datafusion = ["dep:datafusion"]
+full = ["duckdb", "lancedb", "datafusion"]
+
+[dependencies]
+fractalaw-core = { path = "../fractalaw-core" }
+arrow = { workspace = true }
+datafusion = { workspace = true, optional = true }
+duckdb = { workspace = true, optional = true }
+lancedb = { workspace = true, optional = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,18 @@
+[package]
+name = "fractalaw-host"
+description = "Wasmtime host runtime, micro-app supervisor, and WIT interface bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+fractalaw-core = { path = "../fractalaw-core" }
+fractalaw-store = { path = "../fractalaw-store" }
+fractalaw-ai = { path = "../fractalaw-ai" }
+arrow = { workspace = true }
+wasmtime = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,20 @@
+package fractal:data@0.1.0;
+
+interface query {
+    query: func(sql: string) -> result<list<u8>, query-error>;
+
+    record query-error {
+        code: u32,
+        message: string,
+    }
+}
+
+interface mutate {
+    insert: func(table: string, data: list<u8>) -> result<u64, mutate-error>;
+    execute: func(sql: string) -> result<u64, mutate-error>;
+
+    record mutate-error {
+        code: u32,
+        message: string,
+    }
+}

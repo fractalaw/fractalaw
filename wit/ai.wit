@@ -1,0 +1,37 @@
+package fractal:ai@0.1.0;
+
+interface embeddings {
+    embed: func(text: string) -> result<list<f32>, ai-error>;
+    embed-batch: func(texts: list<string>) -> result<list<list<f32>>, ai-error>;
+
+    record ai-error {
+        code: u32,
+        message: string,
+    }
+}
+
+interface inference {
+    generate: func(request: generate-request) -> result<generate-response, ai-error>;
+
+    record generate-request {
+        system-prompt: option<string>,
+        user-prompt: string,
+        max-tokens: u32,
+        temperature: f32,
+    }
+
+    record generate-response {
+        text: string,
+        tokens-used: u32,
+        confidence: f32,
+    }
+}
+
+interface classify {
+    classify: func(text: string, categories: list<string>) -> result<list<classification>, ai-error>;
+
+    record classification {
+        category: string,
+        score: f32,
+    }
+}
