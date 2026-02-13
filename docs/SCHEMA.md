@@ -228,7 +228,20 @@ This struct is referred to as `RelatedLaw` below.
 | `clause` | Utf8 | Text excerpt from the law |
 | `article` | Utf8 | Article reference: `regulation/4`, `section/12` |
 
-### 1.10 Change Logs
+### 1.10 Annotation Totals
+
+Denormalized counts of F/C/I/E annotation codes aggregated across all LAT sections for this law. Avoids a LAT aggregation query for common filters like "show the most heavily amended laws."
+
+| Column | Arrow Type | Nullable | Description | Legacy (`uk_lrt`) |
+|--------|-----------|----------|-------------|-------------------|
+| `total_text_amendments` | Int32 | yes | Total F-code (textual amendment) annotations across all sections | *new* (sum of LAT `amendment_count`) |
+| `total_modifications` | Int32 | yes | Total C-code (modification) annotations | *new* (sum of LAT `modification_count`) |
+| `total_commencements` | Int32 | yes | Total I-code (commencement) annotations | *new* (sum of LAT `commencement_count`) |
+| `total_extents` | Int32 | yes | Total E-code (extent/editorial) annotations | *new* (sum of LAT `extent_count` + `editorial_count`) |
+
+> **Note**: These are derived from the LAT annotation counts at import time. A heavily amended law like the Health and Safety at Work etc. Act 1974 may have hundreds of F-codes; this surfaces that on the hot path without touching LanceDB.
+
+### 1.11 Change Logs
 
 | Column | Arrow Type | Nullable | Description | Legacy (`uk_lrt`) |
 |--------|-----------|----------|-------------|-------------------|
@@ -236,14 +249,14 @@ This struct is referred to as `RelatedLaw` below.
 
 **Dropped**: `amending_change_log`, `amended_by_change_log` — operational scraper state, not needed in the analytical store.
 
-### 1.11 Timestamps
+### 1.12 Timestamps
 
 | Column | Arrow Type | Nullable | Description | Legacy (`uk_lrt`) |
 |--------|-----------|----------|-------------|-------------------|
 | `created_at` | Timestamp(ns, UTC) | no | Record creation time | `created_at` |
 | `updated_at` | Timestamp(ns, UTC) | no | Last update time | `updated_at` |
 
-### 1.12 Dropped Columns
+### 1.13 Dropped Columns
 
 These legacy columns are not carried forward:
 
@@ -482,7 +495,7 @@ Used in: `duties`, `rights`, `responsibilities`, `powers`
 
 | Table | Scalar Columns | List Columns | Total |
 |-------|---------------|-------------|-------|
-| `legislation` (LRT) | 52 | 22 (12 List\<Utf8\> + 10 List\<Struct\>) | 74 |
+| `legislation` (LRT) | 56 | 22 (12 List\<Utf8\> + 10 List\<Struct\>) | 78 |
 | `law_edges` | 8 | — | 8 |
 | `legislation_text` (LAT) | 27 | — | 27 |
 | `amendment_annotations` | 7 | 1 (List\<Utf8\>) | 8 |
