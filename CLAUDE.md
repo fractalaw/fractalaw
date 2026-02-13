@@ -15,6 +15,8 @@ Rust workspace monorepo with 6 crates:
 
 WIT interfaces live in `/wit/` (fractal:data, fractal:ai, fractal:events, fractal:audit).
 
+Session logs live in `/.claude/sessions/` — one markdown file per working session documenting decisions, progress, and next steps.
+
 ## Build
 
 ```bash
