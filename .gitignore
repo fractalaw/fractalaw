@@ -24,7 +24,8 @@ Thumbs.db
 .env.local
 
 # Data (local development)
+/data/*.jsonl
+/data/*.parquet
 *.lance/
 *.duckdb
 *.duckdb.wal
-*.parquet
