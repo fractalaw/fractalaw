@@ -273,7 +273,7 @@ These legacy columns are not carried forward:
 | `live_description` | Duplicate of information available in `affected_by_stats_per_law`. |
 | `popimar`, `popimar_details` | POPIMAR model deferred. May reintroduce in a future phase. |
 | `article_role`, `role_article`, `role_gvt_article`, `article_role_gvt` | Article-level text cross-references. Move to LAT. |
-| `duty_type_article`, `article_duty_type` | Article-level text. Move to LAT. |
+| `duty_type_article`, `article_duty_type` | Covered by `duties`, `rights`, `responsibilities`, `powers` (§1.9). Drop. |
 | `🔺🔻_stats_self_affects_count_per_law_detailed` | Replaced by `self_affects_count` + detail in `law_edges`. |
 
 ---
