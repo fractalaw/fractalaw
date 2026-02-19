@@ -6,11 +6,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "fractalaw"
+path = "src/main.rs"
+
 [dependencies]
-fractalaw-core = { path = "../fractalaw-core" }
-fractalaw-store = { path = "../fractalaw-store" }
-fractalaw-host = { path = "../fractalaw-host" }
-fractalaw-sync = { path = "../fractalaw-sync" }
+fractalaw-store = { path = "../fractalaw-store", features = ["duckdb", "datafusion"] }
+arrow = { workspace = true, features = ["prettyprint"] }
+clap = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

@@ -11,7 +11,7 @@ Rust workspace monorepo with 6 crates:
 - `fractalaw-ai` — ONNX Runtime embeddings/classification (feature-gated)
 - `fractalaw-sync` — Arrow Flight sync, Lance delta sync, Loro CRDTs (flight feature-gated)
 - `fractalaw-host` — Wasmtime WASI Component Model runtime
-- `fractalaw-cli` — Binary entry point
+- `fractalaw-cli` — Binary entry point (`fractalaw` binary), enables DuckDB + DataFusion
 
 WIT interfaces live in `/wit/` (fractal:data, fractal:ai, fractal:events, fractal:audit).
 
@@ -19,20 +19,31 @@ Session logs live in `/.claude/sessions/` — one markdown file per working sess
 
 ## Build
 
+The workspace build requires the C/C++ toolchain (brew gcc) because `fractalaw-cli` enables DuckDB + DataFusion. `.cargo/config.toml` configures `CC`, `CXX`, and `LIBRARY_PATH` automatically.
+
 ```bash
-# Default build (pure Rust only — no C toolchain needed)
+# Workspace build (requires C toolchain — .cargo/config.toml handles paths)
 cargo check --workspace
 cargo test --workspace
 
-# With heavy native deps (requires gcc/g++ and system libs)
+# Pure-Rust crates only (no C toolchain needed)
+cargo check -p fractalaw-core
+cargo test -p fractalaw-core
+
+# With additional native deps
 cargo check -p fractalaw-store --features full
 cargo check -p fractalaw-ai --features onnx
 cargo check -p fractalaw-sync --features flight
+
+# Run the CLI
+cargo run -p fractalaw-cli -- stats
+cargo run -p fractalaw-cli -- law UK_ukpga_1974_37
+cargo run -p fractalaw-cli -- query "SELECT name, year FROM legislation LIMIT 10"
 ```
 
 ## Feature Gates
 
-Heavy C/C++ dependencies are behind optional features to keep the default build pure Rust:
+Heavy C/C++ dependencies are behind optional features on library crates. The CLI binary enables what it needs:
 
 | Crate | Feature | Dependencies |
 |-------|---------|-------------|
@@ -58,5 +69,5 @@ Heavy C/C++ dependencies are behind optional features to keep the default build 
 - OS: Fedora Bluefin DX (atomic/immutable Linux)
 - Rust: installed via rustup (userspace)
 - WASM: wasm32-wasip1 + wasm32-wasip2 targets, cargo-component, wasm-tools
-- C/C++ tools: brew (gcc, cmake, protobuf) — only needed for feature-gated deps
+- C/C++ tools: brew (gcc, cmake, protobuf) — required for workspace build (see `.cargo/config.toml`)
 - IDE: Zed (Flatpak)
