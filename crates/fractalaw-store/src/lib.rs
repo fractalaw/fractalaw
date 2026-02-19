@@ -7,3 +7,8 @@ pub use error::StoreError;
 mod duck;
 #[cfg(feature = "duckdb")]
 pub use duck::DuckStore;
+
+#[cfg(all(feature = "duckdb", feature = "datafusion"))]
+mod fusion;
+#[cfg(all(feature = "duckdb", feature = "datafusion"))]
+pub use fusion::FusionStore;

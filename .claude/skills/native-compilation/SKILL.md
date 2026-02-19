@@ -1,0 +1,137 @@
+# Skill: Native Compilation on Fedora Bluefin DX
+
+## When This Applies
+
+Any time you build `fractalaw-store` with features that pull in C/C++ dependencies: `duckdb`, `lancedb`, `datafusion`, `full`, or `fractalaw-ai` with `onnx`. The pure-Rust default build (`cargo check --workspace`) does NOT need any of this.
+
+## The Environment
+
+- **OS:** Fedora Bluefin DX — an atomic/immutable Linux. System packages are managed via rpm-ostree, not dnf. You cannot `dnf install` build tools.
+- **C/C++ toolchain:** Installed via Homebrew (`/home/linuxbrew/.linuxbrew/bin/gcc`, `g++`). This is the ONLY viable C compiler on this system.
+- **Rust:** Installed via rustup (userspace), not system-packaged.
+- **ccache:** Available and configured. Dramatically speeds up rebuilds of DuckDB's bundled C++ (~200K lines).
+
+## .cargo/config.toml Handles Everything
+
+The project has a `.cargo/config.toml` that sets `CC`, `CXX`, and `LIBRARY_PATH` permanently:
+
+```toml
+[env]
+CXX = "ccache /home/linuxbrew/.linuxbrew/bin/g++"
+CC = "ccache /home/linuxbrew/.linuxbrew/bin/gcc"
+LIBRARY_PATH = "/home/linuxbrew/.linuxbrew/Cellar/gcc/15.2.0_1/lib/gcc/15"
+```
+
+**You do NOT need to pass `CXX=...` or `LIBRARY_PATH=...` as environment variables on the command line.** Cargo reads them from config. Just run:
+
+```bash
+cargo check -p fractalaw-store --features full
+cargo test -p fractalaw-store --features duckdb,datafusion
+```
+
+If the gcc version changes (e.g., 15.2.0_1 → 15.3.0), update the LIBRARY_PATH in `.cargo/config.toml`.
+
+## Build Times — What to Expect
+
+| What | Cold (no cache) | Warm (ccache hit) |
+|------|-----------------|-------------------|
+| `libduckdb-sys` (bundled C++) | 5–8 minutes | 1–2 minutes |
+| `datafusion` + deps | 2–3 minutes | <30 seconds |
+| `fractalaw-store` (Rust code) | <10 seconds | <5 seconds |
+| Full `--features full` from scratch | 8–12 minutes | 2–3 minutes |
+| `cargo test --workspace` (pure Rust) | <15 seconds | <10 seconds |
+
+**Critical:** `libduckdb-sys` compiles DuckDB's entire C++ codebase (~200K lines) via the `bundled` feature. This is by far the slowest step. ccache makes the difference between a painful wait and a tolerable one.
+
+## Run Long Builds in the Background
+
+For any build involving `duckdb` or `full` features, **always run in background** and monitor:
+
+```bash
+# Run build in background
+cargo test -p fractalaw-store --features duckdb,datafusion --no-run 2>&1 &
+
+# Check progress periodically (every 2 min is reasonable)
+# Look for "Compiling libduckdb-sys" → "Compiling duckdb" → "Compiling fractalaw-store" → "Finished"
+```
+
+This prevents stalling the conversation waiting for a 5+ minute C++ compile. The user moved out of Zed IDE specifically because Zed can crash during these long builds.
+
+## Compilation vs Test Execution — Two Phases
+
+Always separate compilation from test execution for feature-gated crates:
+
+```bash
+# Phase 1: Compile only (the slow part)
+cargo test -p fractalaw-store --features duckdb,datafusion --no-run
+
+# Phase 2: Run tests (fast — ~50 seconds for 21 tests)
+cargo test -p fractalaw-store --features duckdb,datafusion
+```
+
+Phase 1 is the bottleneck. Phase 2 loads real Parquet data (~19K legislation rows, ~1M edges) into in-memory DuckDB, but that's fast.
+
+## Arrow Version Alignment
+
+All crates in the workspace MUST use the same arrow version. Currently arrow 57. DuckDB's crates.io release (1.4.4) bundles arrow 56, which creates a type mismatch. The workspace pins duckdb to a git rev that has arrow 57:
+
+```toml
+# Cargo.toml [workspace.dependencies]
+duckdb = { git = "https://github.com/duckdb/duckdb-rs", rev = "a2639608", features = ["bundled"] }
+```
+
+When duckdb 1.4.5+ ships on crates.io with arrow 57, revert to a version dependency. Check with:
+
+```bash
+# Confirm single arrow version in lockfile
+grep 'name = "arrow"' Cargo.lock | sort -u
+# Should show only one version (57.x)
+```
+
+If you see two arrow versions, something has drifted. Fix it before writing code that passes RecordBatch between crates.
+
+## Common Failure Modes
+
+### 1. "cannot find -lstdc++" or linker errors
+`LIBRARY_PATH` is wrong or gcc version changed. Check:
+```bash
+ls /home/linuxbrew/.linuxbrew/Cellar/gcc/*/lib/gcc/*/
+```
+Update `.cargo/config.toml` if the version path changed.
+
+### 2. Build hangs on libduckdb-sys
+Not actually hung — DuckDB C++ just takes 5+ minutes cold. Check ccache stats:
+```bash
+ccache -s
+```
+If cache hit rate is 0%, this is a first build for this rev. Be patient.
+
+### 3. Arrow type mismatch errors
+"`expected arrow::record_batch::RecordBatch, found a different RecordBatch`" — means two arrow versions in the tree. Check `Cargo.lock` for duplicate arrow entries. Fix the dependency that pulls the wrong version.
+
+### 4. Tests fail with "Test data not found"
+The DuckDB and DataFusion tests need real Parquet files in `data/`:
+- `data/legislation.parquet` (19,318 rows, 78 cols, ~12MB)
+- `data/law_edges.parquet` (1,035,305 rows, 8 cols, ~7MB)
+
+These are generated by `duckdb < data/export_legislation.sql` from JSONL source data. They are NOT checked into git.
+
+### 5. Zed IDE crashes during build
+Known issue with long C++ compiles in Zed (Flatpak). Use terminal directly for feature-gated builds. Zed is fine for pure-Rust `cargo check --workspace`.
+
+## Quick Reference
+
+```bash
+# Safe, fast, always works:
+cargo check --workspace
+cargo test --workspace
+
+# Feature-gated (needs C toolchain, takes minutes):
+cargo test -p fractalaw-store --features duckdb,datafusion
+
+# Full store with all backends:
+cargo test -p fractalaw-store --features full
+
+# Just check compilation without running tests:
+cargo check -p fractalaw-store --features full
+```

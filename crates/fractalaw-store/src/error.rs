@@ -15,6 +15,10 @@ pub enum StoreError {
     #[error("arrow error: {0}")]
     Arrow(#[from] arrow::error::ArrowError),
 
+    #[cfg(feature = "datafusion")]
+    #[error("datafusion error: {0}")]
+    DataFusion(#[from] datafusion::error::DataFusionError),
+
     #[error("{0}")]
     Other(String),
 }

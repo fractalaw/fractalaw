@@ -16,6 +16,7 @@ full = ["duckdb", "lancedb", "datafusion"]
 [dependencies]
 fractalaw-core = { path = "../fractalaw-core" }
 arrow = { workspace = true }
+async-trait = "0.1"
 datafusion = { workspace = true, optional = true }
 duckdb = { workspace = true, optional = true }
 lancedb = { workspace = true, optional = true }

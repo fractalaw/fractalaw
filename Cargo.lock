@@ -2970,6 +2970,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow",
+ "async-trait",
  "datafusion 52.1.0",
  "duckdb",
  "fractalaw-core",

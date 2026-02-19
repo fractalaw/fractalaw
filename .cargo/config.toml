@@ -1,0 +1,9 @@
+# Cargo config for fractalaw workspace
+# DuckDB (bundled C++) requires brew's gcc on Fedora Bluefin
+# The cc crate parses CC/CXX with split_whitespace() and recognises
+# "ccache" as a known wrapper prefix.
+
+[env]
+CXX = "ccache /home/linuxbrew/.linuxbrew/bin/g++"
+CC = "ccache /home/linuxbrew/.linuxbrew/bin/gcc"
+LIBRARY_PATH = "/home/linuxbrew/.linuxbrew/Cellar/gcc/15.2.0_1/lib/gcc/15"
