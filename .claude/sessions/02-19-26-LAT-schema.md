@@ -14,17 +14,17 @@ The existing LAT export (`data/legislation_text.parquet`, 99,113 rows from 453 U
 
 ### Critical Issues (must fix)
 
-1. **`section_id` is not unique** — 1,511 duplicates across 99,113 rows (1.5% collision rate). The positional encoding (`{law_name}_{part}_{chapter}_{heading}_{section}_{sub}_{para}_{extent}`) collapses for table rows, extent variants, and some source duplicates. Cannot serve as a primary key.
+1. **`section_id` is not unique** — 1,511 duplicates across 99,113 rows (1.5% collision rate). The positional encoding (`{law_name}_{part}_{chapter}_{heading}_{section}_{sub}_{para}_{extent}`) collapses for table rows, extent variants, and some source duplicates. Cannot serve as a primary key. **Resolution**: Three-column identity design — see [Design Decision: Section Identity and Ordering](#design-decision-section-identity-and-ordering) below.
 
-2. **Annotation IDs are not unique** — 606 duplicates across 21,929 annotation rows (2.8%). All from `UK_uksi_2016_1091` appearing in both LAT and AMD sources with identical annotation codes.
+2. **Annotation IDs are not unique** — 606 duplicates across 21,929 annotation rows (2.8%). All from `UK_uksi_2016_1091` (The Electromagnetic Compatibility Regulations 2016). **Resolution**: Exclude this law from the baseline. Investigation confirmed this is a parser bug — see [Investigation: UK_uksi_2016_1091](#investigation-uksi20161091-annotation-duplicates) below.
 
-3. **`section_id` doesn't generalise** — The positional encoding is a UK-specific Airtable artifact. Germany uses `§`, Norway uses date-based numbering, Turkey uses `kisim/bölüm/madde`. No common grammar across jurisdictions.
+3. **`section_id` doesn't generalise** — The positional encoding is a UK-specific Airtable artifact. Germany uses `§`, Norway uses date-based numbering, Turkey uses `kisim/bölüm/madde`. No common grammar across jurisdictions. **Resolution**: The citation-based `section_id` design generalises to all surveyed jurisdictions — see [Cross-Jurisdiction Validation](#cross-jurisdiction-validation-critical-issue-3) below.
 
 ### Medium Issues (should fix)
 
-4. **`heading` column is a counter, not text** — Values are `1`, `2`, `3`... (63,419 rows). It means "which heading group", not heading text. Rename to `heading_group`.
+4. **`heading` column name is misleading** — Not a sequential counter as SCHEMA-2.0 assumed. It's a **group membership label** whose value is the first section/article number under the parent cross-heading (e.g., `18` means "under the cross-heading that starts at section 18"). Values are VARCHAR with 415 distinct values including alpha-suffixed numbers (`10A`, `25A`, `19AZA`), single letters (`A`, `D`), and dotted decimals (`1.1`, `2.1`). **Resolved**: Rename to `heading_group`. Semantics and values unchanged. See [Investigation: Heading Column](#investigation-heading-column) below.
 
-5. **`section`/`article` split is fragile** — UK Acts use "sections", UK SIs use "articles". Same underlying data, just a labelling convention. The `section_type` column already distinguishes them. Merge into single `provision` column.
+5. **`section`/`article` split is fragile** — UK Acts use "sections", UK SIs use "articles". Same underlying data, just a labelling convention. The `section_type` column already distinguishes them. **Resolved**: Merge into single `provision` column.
 
 6. **249 NULL rows** — Leaked non-UK rows with NULL `section_id`, `law_name`, `section_type`. Filter out.
 
@@ -74,6 +74,269 @@ From [`docs/SCHEMA-2.0.md`](../../docs/SCHEMA-2.0.md) §7:
 - DataFusion bridges DuckDB (hot/analytical) and LanceDB (semantic) in a single SQL plan
 - `fractalaw-store` Task 4 (LanceDB ingestion) is blocked on this work
 
+## Design Decision: Section Identity and Ordering
+
+### The Amendment Insertion Problem
+
+SCHEMA-2.0 recommended replacing `section_id` with `{law_name}:{position}` where `position` is an integer. **This is wrong.** Amendments insert new sections into existing laws, and a snapshot integer breaks:
+
+```
+Before amendment:       After amendment inserting s.41A:
+  position 40 → s.40     position 40 → s.40
+  position 41 → s.41     position 41 → s.41
+  position 42 → s.42     position 42 → s.41A  ← inserted
+                          position 43 → s.42   ← renumbered
+```
+
+An integer `position` is a snapshot of document order at export time. It cannot accommodate insertions without renumbering everything downstream. The legacy positional encoding (`{law_name}_{part}_{chapter}_{heading}_{section}_{sub}_{para}_{extent}`) was an attempt to encode the structural address to avoid this problem — right instinct, bad implementation.
+
+### UK Legal Numbering Conventions
+
+Parliament's own solution to the insertion problem. Surveyed across 99,113 LAT rows:
+
+| Pattern | Example | Sort position | Count in dataset |
+|---|---|---|---|
+| Plain numeric | `s.3` | Base | 5,105 sections |
+| Single letter suffix | `s.3A`, `s.3B` | After 3, before 4 | 923 sections |
+| Z-prefix (insert before A) | `s.3ZA`, `s.3ZB` | After 3, before 3A | 32 sections |
+| Double letter | `s.19AA`, `s.19DZA` | Nested insertions | 114 sections |
+| Sub-section insertions | `s.41(1A)`, `s.41(2A)` | After (1), before (2) | common in sub_section rows |
+| Article equivalents | `reg.2A`, `art.16B` | Same pattern in SIs | 72+ article rows |
+
+The structural citation is **parliament's canonical, permanent address**. "Section 41A of the Environment Act 1995" never changes — even when further amendments add 41B, 41C, or 41ZA before it.
+
+### Resolution: Three-Column Design
+
+| Column | Type | Role | Stable? |
+|---|---|---|---|
+| `section_id` | Utf8 | **Structural citation** — the legal address. `{law_name}:s.41A` or `{law_name}:reg.2A(1)(b)` | Yes — permanent, parliament-assigned |
+| `sort_key` | Utf8 | **Normalised sort encoding** — machine-sortable string that respects insertion ordering | Yes — derived from citation, handles Z-prefixes |
+| `position` | Int32 | **Snapshot index** — integer document order at export time. Useful for fast range queries. Reassigned on re-export | No — changes when sections are inserted |
+
+**`section_id`** encodes the structural citation path:
+```
+UK_ukpga_1974_37:s.25A          — section 25A of HSWA 1974
+UK_ukpga_1974_37:s.25A(1)       — sub-section (1) of section 25A
+UK_ukpga_1995_25:s.41A          — inserted section 41A of Environment Act
+UK_uksi_2002_2677:reg.2A(1)(b)  — inserted regulation 2A(1)(b) of COSHH
+UK_ukpga_1995_25:sch.2.para.3   — schedule 2, paragraph 3
+UK_ukpga_1974_37:s.23[E+W]      — E+W territorial version of section 23
+UK_ukpga_1974_37:s.23[NI]       — NI territorial version (different text!)
+UK_ukpga_1974_37:s.23(4)[S]     — Scotland version of sub-section (4)
+```
+
+The format is `{law_name}:{citation}[{extent}]` where:
+- Citation uses the `section_type` to determine prefix (`s.` for section, `reg.` for regulation, `art.` for article, `sch.` for schedule, etc.)
+- The `[extent]` qualifier is present only when parallel territorial provisions exist — i.e., when the same section number has different text for different regions
+
+### Parallel Territorial Provisions
+
+29 laws in the dataset (719 section-level rows) have parallel provisions where the same section number exists with different text for different territorial extents. Example: HSWA 1974 section 23(4) exists in three versions:
+- **E+W**: references "Regulatory Reform (Fire Safety) Order 2005"
+- **NI**: references "Fire Precautions Act 1971"
+- **S**: references "Fire (Scotland) Act 2005"
+
+These are substantively different legal provisions — not formatting variations. legislation.gov.uk serves them on a single page (`/section/23`) with fragment anchors (`#extent-E-W`, `#extent-S`, `#extent-N.I.`) but no separate URLs. The canonical legal citation remains "section 23" regardless of which territorial version applies — extent is a property of the provision, not part of the parliamentary numbering.
+
+For `section_id` uniqueness, the extent qualifier is needed only when a law has parallel provisions for the same section number. The export detects this per-law and adds `[extent]` where required. Sections with a single territorial version (the common case — most of the 99K rows) have no qualifier.
+
+**`sort_key`** normalises the citation into a lexicographically-sortable string:
+```
+s.3       → 003.000.000~
+s.3ZA     → 003.001.000~
+s.3ZB     → 003.002.000~
+s.3A      → 003.010.000~
+s.3AA     → 003.010.010~
+s.3AB     → 003.010.020~
+s.3B      → 003.020.000~
+s.4       → 004.000.000~
+s.23[E+W] → 023.000.000~E+W    (parallel provisions: extent as sort suffix)
+s.23[NI]  → 023.000.000~NI
+s.23[S]   → 023.000.000~S
+```
+
+Rules:
+- Numeric base: zero-padded to 3 digits (handles up to section 999)
+- Z-prefix: sorts in 001-009 range (before A at 010)
+- Letter suffix: A=010, B=020, C=030... (gaps for nested insertions)
+- Double letters: AA=010+010, AB=010+020
+- Sub-levels: additional `.NNN` segments for paragraph/sub-paragraph
+- Extent qualifier: `~{extent}` suffix for parallel territorial provisions (tilde sorts after digits/letters, so all versions of a section group together). Within a section, extent variants sort alphabetically: E+W < NI < S
+
+**`position`** remains as a convenience integer. It's the row index in document order at export time. Useful for `LIMIT`/`OFFSET` queries and fast range scans. But it's derived and ephemeral — not an identifier.
+
+### Why Not Just Integer Position?
+
+- **Incremental updates** (Phase 3 regulation-importer): inserting section 41A between positions 248 and 249 requires renumbering all subsequent rows. With structural citation, you just add the row.
+- **CRDT sync** (Fractalaw uses Loro): position-based ordering doesn't merge — two nodes inserting different sections at the "same position" conflict. Citation-based ordering is conflict-free because parliament assigns unique citations.
+- **Human reference**: "Section 41A" is how lawyers cite it. An integer position is meaningless to users.
+- **Cross-version stability**: the same section across different versions of a law should have the same `section_id`. Position may differ as other sections are added/removed.
+
+### Why Not Just Structural Citation Without Sort Key?
+
+The citation string doesn't sort correctly without normalisation:
+```
+Naive string sort:        Correct document order:
+s.1                       s.1
+s.10                      s.2
+s.11                      s.3
+s.2    ← wrong            s.3ZA
+s.3                       s.3A
+s.3A                      s.4
+s.3ZA  ← wrong            ...
+s.4                       s.10
+                          s.11
+```
+
+The `sort_key` column encodes the parliamentary ordering rules into a lexicographically-sortable format. `ORDER BY sort_key` always recovers correct document order.
+
+---
+
+## Investigation: UK_uksi_2016_1091 Annotation Duplicates
+
+**Law**: The Electromagnetic Compatibility Regulations 2016 (SI 2016/1091). A post-Brexit instrument transposing EU Directive 2014/30/EU, with 6 Parts and 7 Schedules. Heavily amended after 31 December 2020 to create parallel legal texts for E+W+S (Great Britain regime) and N.I. (Northern Ireland Protocol regime).
+
+### What the legislation.gov.uk XML reveals
+
+The underlying Crown Legislation Markup Language (CLML) XML uses **opaque hash-based commentary IDs**, not F-code numbers:
+
+```xml
+<Commentary id="key-089efbbc031597a80350b41a40f9fac0" Type="F">
+  <Para><Text>Words in reg. 2(1) omitted (E.W.S.) (31.12.2020)...</Text></Para>
+</Commentary>
+```
+
+The human-readable F1, F2, F3 numbering is a **presentation-layer construct** — assigned sequentially per-section when the HTML is rendered. The F-code numbers are not stable identifiers in the source data.
+
+### Root cause: territorial duplication + source overlap
+
+This SI has **systematic territorial duplication** — nearly every substantive amendment exists in two versions (E+W+S and N.I.), creating parallel legal texts within a single statutory instrument. For example, in Regulation 2 (Interpretation):
+- **F1-F22** apply to the E+W+S version (substituting "EU market" → "market of Great Britain", "CE marking" → "UK marking")
+- **F23-F35** apply to the N.I. version (using "relevant market", retaining "notified body", adding "UK(NI) indication")
+
+The parser could not correctly handle this complexity. The same annotations appear in both the LAT CSV files and the AMD CSV files for this law, producing 606 duplicate `{law_name}_{code}` IDs.
+
+### Decision: Exclude from baseline
+
+**Do not migrate UK_uksi_2016_1091.** The data cannot be trusted. The parser needs investigation for laws with heavy post-Brexit territorial duplication — this is a pattern shared by hundreds of product safety SIs amended during the EU Exit transition, but only this one law appears in both LAT and AMD sources for the current dataset. Excluding it removes all 606 annotation duplicates.
+
+The synthetic annotation ID design (`{law_name}:{code_type}:{seq}`) would also prevent this class of duplicate, but the underlying data quality issue remains. Better to fix the parser than to paper over broken data.
+
+---
+
+## Cross-Jurisdiction Validation (Critical Issue #3)
+
+Examined all 7 non-UK LAT source files (`xLAT-*.csv`) to confirm the citation-based `section_id` design generalises. Every jurisdiction surveyed uses letter-suffix insertion for amendments — the pattern is universal.
+
+### Amendment Insertion Patterns by Jurisdiction
+
+| Jurisdiction | Symbol | Placement | Inserted provision example | Inserted chapter |
+|---|---|---|---|---|
+| **UK** | s./reg./art. | word before number | s.3A, s.3ZA, reg.2A | — |
+| **Germany (DE)** | § | § before number (`§ 3`) | §5a | — |
+| **Norway (NO)** | § | § before number (`§ 3.`) | §16 a., §16 d. through §16 h. | Kapittel 3A, 7A |
+| **Turkey (TUR)** | Madde | word before number (`Madde 3`) | Madde 27/A (slash notation) + Ek Madde N (supplementary series) | — |
+| **Austria (AUT)** | § | § before number (`§ 3`) | §4a, §4b, §7a | — |
+| **Denmark (DK)** | § | § before number (`§ 1.`) | §72 a, §7a, §7b, §7c | Kapitel 11 a |
+| **Finland (FIN)** | § | number before § (`1 §`) | 13 h § | 3a luku (Chapter 3a) |
+| **Sweden (SWE)** | § | number before § (`1 §`) | 3 a § (expected; tends to reprint/consolidate) | — |
+
+### Structural Citation Examples by Jurisdiction
+
+The `{law_name}:{citation}` format adapts per-jurisdiction with a jurisdiction-specific citation prefix:
+
+| Jurisdiction | Example `section_id` | Notes |
+|---|---|---|
+| UK | `UK_ukpga_1974_37:s.25A(1)` | `s.` for section, `reg.` for regulation |
+| DE | `DE_2020_ArbSchG:§5a.Abs.1` | `§` for article, `Abs.` for paragraph |
+| NO | `NO_1973_03-09-14:§16a` | `§` for section, space+period in source |
+| TUR | `TUR_1983_2872:m.27/A` | `m.` for madde; slash preserved |
+| TUR (supplementary) | `TUR_1983_2872:ek.5` | `ek.` for Ek Madde (supplementary article) |
+| AUT | `AUT_2005_121:§4a` | Same as DE |
+| DK | `DK_2020_1406:§72a.stk.2` | `stk.` for Stykke (subsection) |
+| FIN | `FIN_1994_719:§13h` | Number-before-symbol convention |
+| SWE | `SWE_2020_1:§3a` | Number-before-symbol convention |
+
+### Key findings
+
+1. **All jurisdictions use letter-suffix insertion.** The three-column design (structural citation + sort key + position) works universally because every jurisdiction has a canonical, stable way to cite a provision that accommodates amendments.
+
+2. **Turkey is the only outlier** — it has two insertion mechanisms: slash notation (`Madde 27/A`) and a separate supplementary article series (`Ek Madde N`) that lives after the main body. Both are representable as citations. The sort key needs a rule for placing `ek.N` after the main article sequence.
+
+3. **Sort key normalisation is jurisdiction-specific** but the structure is the same everywhere: zero-padded numeric base + letter suffix range. Each jurisdiction needs a mapping from its naming conventions to the normalised encoding, but the three-column design holds across all of them.
+
+4. **Finland and Sweden reverse the symbol placement** (`1 §` instead of `§ 1`), but the citation in `section_id` can normalise to a consistent format regardless of source rendering.
+
+5. **Norway shows the most aggressive amendment insertion** — runs of `§16 d` through `§16 h` inserted as a block by a single amending act, plus inserted chapters like `Kapittel 3A`. The sort key encoding handles this identically to UK's pattern.
+
+### Conclusion
+
+The citation-based `section_id` design generalises to all surveyed jurisdictions. The only jurisdiction-specific element is the citation prefix mapping (what prefix to use for the provision type), which is already captured by the `section_type` column. **Critical Issue #3 is resolved.**
+
+---
+
+## Investigation: Heading Column
+
+SCHEMA-2.0 described the `heading` column as "a counter (1, 2, 3...)" and recommended renaming to `heading_group` or `heading_idx`. The counter characterisation was wrong — the column is more nuanced than that.
+
+### What the column actually contains
+
+The `heading` column is a **group membership label** cascaded from parent cross-heading rows to all their descendant content rows. Its value is the **first section/article number under that cross-heading**. For HSWA 1974 (Part I):
+
+| heading value | cross-heading text | sections covered |
+|---|---|---|
+| `1` | "Preliminary" | s.1 only |
+| `2` | "General duties" | s.2–s.9 |
+| `18` | "Enforcement" | s.18–s.26 |
+| `27` | "Obtaining and disclosure of information" | s.27–s.28 |
+| `29` | "Special provisions relating to agriculture" | s.29–s.32 |
+| `33` | "Provisions as to offences" | s.33–s.42 |
+
+Values jump (1 → 2 → 18 → 27) because they track the lead section number, not a sequential index. The column is VARCHAR with **415 distinct values** including:
+- Numeric: `1` through `315`
+- Alpha-suffixed: `10A`, `11A`, `25A`, `19AZA`, `19BA`
+- Single letters: `A`, `D`, `I`, `M`, `N`, `P`, `T` (Victorian-era Acts, NI regulations)
+- Dotted decimals: `1.1`, `2.1`, `2.6`, `3.1`, `7.2` (NI safety sign regulations)
+- Data artifact: `F107` (leaked Westlaw footnote reference — 1 row)
+
+### Coverage
+
+- **63,419 rows** (64%) have heading populated
+- **35,694 rows** (36%) have heading NULL — titles, parts, chapters, schedules, signed blocks, notes, and content in laws/parts without cross-headings
+- **19 laws** have zero heading-type rows at all (including Water Scotland Act 1980, 247 rows)
+
+### Two kinds of heading-type rows
+
+The `section_type = 'heading'` rows serve two distinct roles:
+
+| Role | Count | heading column | section column | Description |
+|---|---|---|---|---|
+| **Cross-heading** | 10,316 | populated | NULL | Groups multiple sections: "General duties" spanning s.2–s.9 |
+| **Section-title** | 4,182 | NULL | populated | Per-section title line preceding a single section's content |
+| **Orphan** | 9 | NULL | NULL | All from UK_uksi_2001_2954 (Oil Storage Regulations) — structural grouping rows with heading column never populated |
+
+Cross-headings cascade their value to all descendant rows. Section-title headings don't — they're standalone title lines for individual provisions (common in SIs and older regulations).
+
+### Edge cases
+
+- **Heading resets at schedule boundaries**: A law's body might end with heading=62, then the schedule starts fresh with heading=1. The heading column is scoped to `(law_name, part/schedule)`, not globally.
+- **Consecutive heading rows**: 20 cases where two heading-type rows appear with no content between them (amendment SIs, schedule references, territorial duplication artifacts).
+- **Scrambled position ordering**: Some NI SIs have rows in non-logical position order, but the heading column still correctly identifies group membership.
+
+### Recommendation: Rename to `heading_group`
+
+The column semantics are sound — it's a genuine group membership label that correctly identifies which cross-heading a provision falls under. The name `heading` is the problem: it reads as "heading text" when it's actually "which heading group am I in".
+
+**Rename `heading` → `heading_group`.** No structural change, no value transformation, just a name that accurately describes the column's role. The `heading_idx` alternative is worse because it implies a sequential index, which this is not.
+
+Document that:
+- Values are the lead section/article number of the parent cross-heading (not a counter)
+- Scoped to `(law_name, part/schedule)` — resets at schedule boundaries
+- NULL for rows outside any cross-heading group (title, part, chapter, schedule, etc.)
+- The heading **text** lives in the `text` column of rows with `section_type = 'heading'`
+
+---
+
 ## Session Goal
 
 **Get a clean, usable LAT baseline for development** — not perfect, not multi-jurisdiction, but correct enough to unblock LanceDB ingestion (Task 4) and eventually Phase 2 embeddings.
@@ -81,43 +344,55 @@ From [`docs/SCHEMA-2.0.md`](../../docs/SCHEMA-2.0.md) §7:
 ## Tasks
 
 ### 1. Revise the LAT schema
-- [ ] Apply SCHEMA-2.0 recommendations: new `section_id` format, `heading` rename, `section`/`article` merge, annotation ID fix
+- [ ] Apply the three-column identity design: `section_id` (structural citation), `sort_key` (normalised sort), `position` (snapshot integer)
+- [ ] Rename `heading` → `heading_group`, merge `section`/`article` → `provision`
+- [ ] New annotation `id` = `{law_name}:{code_type}:{seq}`, add `source` column
 - [ ] Update `docs/SCHEMA.md` Tables 3 and 4
 - [ ] Update `crates/fractalaw-core/src/schema.rs` — `legislation_text_schema()` and `amendment_annotations_schema()`
 - [ ] Update unit tests in schema.rs
 
-### 2. Rewrite the LAT export script
+### 2. Build sort key generation
+- [ ] Implement sort key normalisation rules for UK naming conventions
+- [ ] Handle: plain numeric, single letter suffix, Z-prefix, double letter, sub-section insertions
+- [ ] Validate against known ordering in the dataset (e.g., Environment Act s.40 → s.41 → s.41A → s.42)
+
+### 3. Rewrite the LAT export script
 - [ ] Rewrite `data/export_lat.sql` applying the revised schema
-- [ ] New `section_id` = `{law_name}:{position}` (drop legacy positional encoding, keep as `legacy_id`)
+- [ ] Generate `section_id` from citation path, `sort_key` from normalisation rules
 - [ ] New annotation `id` = `{law_name}:{code_type}:{seq}`
 - [ ] Add `source` column to annotations
-- [ ] Filter NULL rows
+- [ ] Keep `legacy_id` for backward reference
+- [ ] Filter NULL rows (249 rows)
+- [ ] Exclude `UK_uksi_2016_1091` (broken parser data, 606 annotation duplicates)
 - [ ] Validate: zero duplicate `section_id`, zero duplicate annotation `id`
 
-### 3. Re-export LAT Parquet files
+### 4. Re-export LAT Parquet files
 - [ ] Run revised export script
 - [ ] Validate row counts match expectations (~99K content, ~22K annotations minus dupes/nulls)
 - [ ] Verify FK linkage: `law_name` in LAT matches `name` in LRT (legislation.parquet)
-- [ ] Verify `ORDER BY position` recovers document order
+- [ ] Verify `ORDER BY sort_key` recovers correct document order for laws with inserted sections
 
-### 4. Smoke test with DuckDB
+### 5. Smoke test with DuckDB
 - [ ] Load `legislation_text.parquet` into DuckDB alongside existing legislation + law_edges
-- [ ] Run cross-table queries: "show article text for HSWA 1974 section 2"
+- [ ] Run cross-table queries: "show article text for HSWA 1974 section 25A"
 - [ ] Run annotation queries: "show all F-code amendments for COSHH"
 - [ ] Verify `section_id` uniqueness: `SELECT section_id, count(*) HAVING count(*) > 1` returns zero rows
+- [ ] Verify sort order: compare `ORDER BY sort_key` vs `ORDER BY position` for laws with insertions
 
-### 5. Update SCHEMA.md and close out
+### 6. Update SCHEMA.md and close out
+- [ ] Document the three-column identity design and sort key rules
 - [ ] Document any deviations from SCHEMA-2.0 recommendations
 - [ ] Update migration path section in SCHEMA.md
 
-## Reference: LAT Record Shape
+## Reference: LAT Record Shape (Revised)
 
-From the legl Airtable prototype — each record is one structural unit of a law:
+Each record is one structural unit of a law:
 
 ```
 law_name       — parent law identifier (FK to LRT)
-position       — document order (1-based integer)
-section_id     — {law_name}:{position} (NEW — replaces legacy encoding)
+section_id     — structural citation: {law_name}:s.25A(1) (STABLE across amendments)
+sort_key       — normalised sort string: 025.010.001 (lexicographic document order)
+position       — snapshot integer index (1-based, reassigned on re-export)
 section_type   — title, part, chapter, heading, section, article, paragraph, ...
 hierarchy_path — part.1/heading.2/section.3/sub.1
 depth          — count of populated hierarchy levels
@@ -134,6 +409,7 @@ amendment_count, modification_count, commencement_count, extent_count, editorial
 
 embedding      — FixedSizeList<Float32, 384> (null until Phase 2)
 embedding_model, embedded_at
+legacy_id      — original Airtable positional encoding (nullable, for migration only)
 created_at, updated_at
 ```
 

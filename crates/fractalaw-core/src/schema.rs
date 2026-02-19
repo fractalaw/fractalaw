@@ -163,35 +163,40 @@ pub mod esh {
     ///
     /// One row per structural unit of legal text (article, section, paragraph, etc.).
     /// Stored in LanceDB for semantic search and embedding similarity.
+    ///
+    /// Identity uses a three-column design:
+    /// - `section_id`: structural citation (`{law_name}:s.25A(1)`) — stable across amendments
+    /// - `sort_key`: normalised lexicographic encoding for correct document order
+    /// - `position`: snapshot integer index (1-based), reassigned on re-export
     pub fn legislation_text_schema() -> Schema {
         Schema::new(vec![
-            // 3.1 Identity & Position (6)
+            // 3.1 Identity & Position (7)
             Field::new("law_name", DataType::Utf8, false),
-            Field::new("position", DataType::Int32, false),
             Field::new("section_id", DataType::Utf8, false),
+            Field::new("sort_key", DataType::Utf8, false),
+            Field::new("position", DataType::Int32, false),
             Field::new("section_type", DataType::Utf8, false),
-            Field::new("hierarchy_path", DataType::Utf8, false),
+            Field::new("hierarchy_path", DataType::Utf8, true),
             Field::new("depth", DataType::Int32, false),
-            // 3.2 Structural Hierarchy (8)
+            // 3.2 Structural Hierarchy (7)
             Field::new("part", DataType::Utf8, true),
             Field::new("chapter", DataType::Utf8, true),
-            Field::new("heading", DataType::Utf8, true),
-            Field::new("section", DataType::Utf8, true),
-            Field::new("article", DataType::Utf8, true),
+            Field::new("heading_group", DataType::Utf8, true),
+            Field::new("provision", DataType::Utf8, true),
             Field::new("paragraph", DataType::Utf8, true),
             Field::new("sub_paragraph", DataType::Utf8, true),
             Field::new("schedule", DataType::Utf8, true),
-            // 3.4 Content (3)
+            // 3.3 Content (3)
             Field::new("text", DataType::Utf8, false),
             Field::new("language", DataType::Utf8, false),
             Field::new("extent_code", DataType::Utf8, true),
-            // 3.5 Amendment Annotations (5)
+            // 3.4 Amendment Annotations (5)
             Field::new("amendment_count", DataType::Int32, true),
             Field::new("modification_count", DataType::Int32, true),
             Field::new("commencement_count", DataType::Int32, true),
             Field::new("extent_count", DataType::Int32, true),
             Field::new("editorial_count", DataType::Int32, true),
-            // 3.6 Embeddings (3)
+            // 3.5 Embeddings (3)
             Field::new(
                 "embedding",
                 DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 384),
@@ -199,6 +204,8 @@ pub mod esh {
             ),
             Field::new("embedding_model", DataType::Utf8, true),
             Field::new("embedded_at", timestamp_ns_utc(), true),
+            // 3.6 Migration (1)
+            Field::new("legacy_id", DataType::Utf8, true),
             // 3.7 Metadata (2)
             Field::new("created_at", timestamp_ns_utc(), false),
             Field::new("updated_at", timestamp_ns_utc(), false),
@@ -209,21 +216,25 @@ pub mod esh {
     ///
     /// One row per legislative change annotation (F/C/I/E codes).
     /// Links amendment footnotes to the LAT sections they affect.
+    ///
+    /// Annotation `id` is a synthetic key: `{law_name}:{code_type}:{seq}` where
+    /// `seq` is a per-law, per-code_type counter assigned during export.
     pub fn amendment_annotations_schema() -> Schema {
         Schema::new(vec![
-            // 4.1 Identity (4)
+            // 4.1 Identity (5)
             Field::new("id", DataType::Utf8, false),
             Field::new("law_name", DataType::Utf8, false),
             Field::new("code", DataType::Utf8, false),
             Field::new("code_type", DataType::Utf8, false),
-            // 4.3 Content (2)
+            Field::new("source", DataType::Utf8, false),
+            // 4.2 Content (2)
             Field::new("text", DataType::Utf8, false),
             Field::new(
                 "affected_sections",
                 DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
                 true,
             ),
-            // 4.4 Metadata (2)
+            // 4.3 Metadata (2)
             Field::new("created_at", timestamp_ns_utc(), false),
             Field::new("updated_at", timestamp_ns_utc(), false),
         ])
@@ -265,12 +276,12 @@ mod tests {
 
     #[test]
     fn legislation_text_schema_field_count() {
-        assert_eq!(esh::legislation_text_schema().fields().len(), 27);
+        assert_eq!(esh::legislation_text_schema().fields().len(), 28);
     }
 
     #[test]
     fn amendment_annotations_schema_field_count() {
-        assert_eq!(esh::amendment_annotations_schema().fields().len(), 8);
+        assert_eq!(esh::amendment_annotations_schema().fields().len(), 9);
     }
 
     #[test]
@@ -309,10 +320,50 @@ mod tests {
     }
 
     #[test]
-    fn legislation_text_position_not_nullable() {
+    fn legislation_text_identity_not_nullable() {
         let schema = esh::legislation_text_schema();
+        assert!(!schema.field_with_name("section_id").unwrap().is_nullable());
+        assert!(!schema.field_with_name("sort_key").unwrap().is_nullable());
         assert!(!schema.field_with_name("position").unwrap().is_nullable());
         assert!(!schema.field_with_name("text").unwrap().is_nullable());
+    }
+
+    #[test]
+    fn legislation_text_hierarchy_path_nullable() {
+        let schema = esh::legislation_text_schema();
+        assert!(
+            schema
+                .field_with_name("hierarchy_path")
+                .unwrap()
+                .is_nullable()
+        );
+    }
+
+    #[test]
+    fn legislation_text_legacy_id_nullable() {
+        let schema = esh::legislation_text_schema();
+        assert!(schema.field_with_name("legacy_id").unwrap().is_nullable());
+    }
+
+    #[test]
+    fn legislation_text_has_provision_not_section_article() {
+        let schema = esh::legislation_text_schema();
+        assert!(schema.field_with_name("provision").is_ok());
+        assert!(schema.field_with_name("section").is_err());
+        assert!(schema.field_with_name("article").is_err());
+    }
+
+    #[test]
+    fn legislation_text_has_heading_group_not_heading() {
+        let schema = esh::legislation_text_schema();
+        assert!(schema.field_with_name("heading_group").is_ok());
+        assert!(schema.field_with_name("heading").is_err());
+    }
+
+    #[test]
+    fn annotation_source_not_nullable() {
+        let schema = esh::amendment_annotations_schema();
+        assert!(!schema.field_with_name("source").unwrap().is_nullable());
     }
 
     // ── List<Struct> type assertions ──

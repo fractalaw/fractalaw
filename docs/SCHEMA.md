@@ -334,27 +334,29 @@ This table is the Fractalaw evolution of the [legl Airtable prototype](https://g
 | Column | Arrow Type | Nullable | Description |
 |--------|-----------|----------|-------------|
 | `law_name` | Utf8 | no | Parent law identifier (FK to LRT `legislation.name`). Acronyms stripped from legacy Airtable IDs (see ID normalization below). |
-| `position` | Int32 | no | **Document order index.** Monotonically increasing integer (1-based) preserving the published order of sections within a law. |
-| `section_id` | Utf8 | no | Unique ID derived from the positional encoding in the source Airtable export. Format: `{law_name}_{part}_{heading}_{section}_{sub}_{para}_{extent}` with underscores as delimiters. Example: `UK_ukpga_1974_37_1__1_1_1__UK` (Part 1, Heading 1, Section 1, Sub-section 1, extent UK). Not a sort key — use `position` for document order. |
+| `section_id` | Utf8 | no | **Structural citation** — the canonical legal address of this provision. Format: `{law_name}:{citation}[{extent}]`. Stable across amendments — parliament assigns unique citations that never change. Examples: `UK_ukpga_1974_37:s.25A(1)`, `UK_uksi_2002_2677:reg.2A(1)(b)`, `UK_ukpga_1974_37:s.23[E+W]`. See design note below. |
+| `sort_key` | Utf8 | no | **Normalised sort encoding** — machine-sortable string that respects legislative insertion ordering. `ORDER BY sort_key` recovers correct document order within a law. Derived from `section_id` citation. See design note below. |
+| `position` | Int32 | no | **Snapshot document order index.** Monotonically increasing integer (1-based) preserving the published order of sections within a law at export time. Useful for range queries. Reassigned on re-export — not an identifier. |
 | `section_type` | Utf8 | no | Structural type — see enum below |
-| `hierarchy_path` | Utf8 | yes | Slash-separated path in document structure: `part.1/heading.1/section.1/sub.1`. Empty string for root-level rows (e.g., `title`). |
+| `hierarchy_path` | Utf8 | yes | Slash-separated path in document structure: `part.1/heading.2/section.3/sub.1`. NULL for root-level rows (e.g., `title`). |
 | `depth` | Int32 | no | Count of populated structural hierarchy levels (0 = title/root, 1 = part, 2 = heading within part, etc.). |
 
-> **Design note — document ordering**: The legl Airtable prototype encoded published order into positional `section_id` fields, but these break as sort keys when UK laws contain parallel provisions for different territorial extents within the same numbering scheme (e.g., `reg.3(1)(a) [GB]` and `reg.3(1)(a) [NI]`). The `position` column resolves this: an integer assigned in document-traversal order. To recover published order, `ORDER BY law_name, position`.
+> **Design note — three-column identity**: The `section_id` is a structural citation derived from parliament's own canonical addressing scheme. "Section 41A of the Environment Act 1995" never changes — even when further amendments insert 41B, 41C, or 41ZA. This is stable across amendments, unlike an integer position which requires renumbering when sections are inserted. The `sort_key` normalises the citation into a lexicographically-sortable format (e.g., `s.3` → `003.000.000~`, `s.3ZA` → `003.001.000~`, `s.3A` → `003.010.000~`). The `position` column remains as a convenience integer for fast range scans.
+>
+> When a law has parallel territorial provisions (same section number with different text for different regions — 29 laws, 719 rows in the UK dataset), the `section_id` includes an extent qualifier: `s.23[E+W]`, `s.23[NI]`, `s.23[S]`. Sections with a single territorial version (the common case) have no qualifier.
 
 > **Design note — ID normalization**: Legacy Airtable IDs carry acronym suffixes/prefixes (e.g., `UK_ukpga_1974_37_HSWA`, `UK_CMCHA_ukpga_2007_19`). All IDs are stripped to the canonical form `{JURISDICTION}_{type_code}_{year}_{number}` during export. Three patterns are handled: `UK_ACRO_type_year_num → UK_type_year_num`, `UK_type_year_num_ACRO → UK_type_year_num`, `UK_year_num_ACRO → UK_year_num`.
 
 ### 3.2 Structural Hierarchy
 
-Each level is nullable — only populated when relevant to this record's position. A section-level record will have `part` and `chapter` populated (its parents) but `paragraph` null.
+Each level is nullable — only populated when relevant to this record's position. A section-level record will have `part` and `chapter` populated (its parents) but `paragraph` null. This is the **materialised path** pattern — it trades storage for query simplicity. In a columnar store (DuckDB/Parquet), the repeated string values compress extremely well via dictionary encoding.
 
 | Column | Arrow Type | Nullable | Description |
 |--------|-----------|----------|-------------|
 | `part` | Utf8 | yes | Part number/letter |
 | `chapter` | Utf8 | yes | Chapter number |
-| `heading` | Utf8 | yes | Heading text (if this is or belongs to a heading) |
-| `section` | Utf8 | yes | Section number (UK Acts) |
-| `article` | Utf8 | yes | Article/regulation number (UK SIs, EU, most jurisdictions) |
+| `heading_group` | Utf8 | yes | Cross-heading group membership label. Value is the first section/article number under the parent cross-heading (e.g., `18` means "under the cross-heading starting at section 18"). Not a sequential counter. NULL for rows outside any cross-heading group (title, part, chapter, schedule, etc.). Scoped to `(law_name, part/schedule)` — resets at schedule boundaries. The heading **text** is in the `text` column of rows with `section_type = 'heading'`. |
+| `provision` | Utf8 | yes | Section number (UK Acts) or article/regulation number (UK SIs, EU, most jurisdictions). Merges the former `section` and `article` columns — the `section_type` column distinguishes the provision type. |
 | `paragraph` | Utf8 | yes | Paragraph number |
 | `sub_paragraph` | Utf8 | yes | Sub-paragraph number |
 | `schedule` | Utf8 | yes | Schedule/annex number |
@@ -407,7 +409,13 @@ Normalised across jurisdictions. Each country's scraper maps its local terminolo
 | `embedding_model` | Utf8 | yes | Model used to generate embedding: `all-MiniLM-L6-v2`, etc. |
 | `embedded_at` | Timestamp(ns, UTC) | yes | When embedding was generated |
 
-### 3.7 Metadata
+### 3.7 Migration
+
+| Column | Arrow Type | Nullable | Description |
+|--------|-----------|----------|-------------|
+| `legacy_id` | Utf8 | yes | Original Airtable positional encoding (`{law_name}_{part}_{heading}_{section}_{sub}_{para}_{extent}`). Preserved for backward-compatible lookups during migration. Not a primary key — has 1.5% collision rate. |
+
+### 3.8 Metadata
 
 | Column | Arrow Type | Nullable | Description |
 |--------|-----------|----------|-------------|
@@ -433,10 +441,11 @@ This table is the Fractalaw evolution of the legl Airtable amendments table. UK 
 
 | Column | Arrow Type | Nullable | Description | Legacy (legl) |
 |--------|-----------|----------|-------------|---------------|
-| `id` | Utf8 | no | Unique annotation ID. Two formats depending on source: **F-code annotations** use `{law_name}_{code}` e.g., `UK_ukpga_1990_43_F123`. **C/I/E annotations** use the positional ID from the LAT source row e.g., `UK_ukpga_1974_37______ex_1` (suffix `_cx_N` for commencement, `_mx_N` for modification, `_ex_N` for extent). Codes are not globally unique per law (e.g., C36 may appear 39 times for HSWA 1974); the positional ID ensures uniqueness. | `ID` |
+| `id` | Utf8 | no | Synthetic unique annotation ID. Format: `{law_name}:{code_type}:{seq}` where `seq` is a per-law, per-code_type counter assigned during export. Example: `UK_ukpga_1974_37:amendment:1`. Guaranteed unique — replaces the legacy format which had a 2.8% collision rate. | `ID` |
 | `law_name` | Utf8 | no | Parent law identifier (FK to LRT `legislation.name`). Acronyms stripped (see Table 3 ID normalization note). | derived from `opts.name` |
-| `code` | Utf8 | no | Annotation code from legislation.gov.uk: `F1`, `F123`, `C42`, `I7`, `E3`. Extracted from the annotation text or AMD `Ef Code` column. | `Ef Code` |
+| `code` | Utf8 | no | Annotation code from legislation.gov.uk: `F1`, `F123`, `C42`, `I7`, `E3`. Extracted from the annotation text or AMD `Ef Code` column. Not unique per law (C36 appears 39 times in HSWA 1974). | `Ef Code` |
 | `code_type` | Utf8 | no | Category: `amendment`, `modification`, `commencement`, `extent_editorial` | derived from source record type |
+| `source` | Utf8 | no | Data provenance: `lat_cie` (C/I/E annotations from LAT CSV), `lat_f` (F-code annotations from LAT CSV), `amd_f` (F-code annotations from AMD CSV). Makes the linkage mechanism explicit. | *new* |
 
 ### 4.2 Annotation Codes
 
@@ -510,8 +519,8 @@ Used in: `duties`, `rights`, `responsibilities`, `powers`
 |-------|---------------|-------------|-------|
 | `legislation` (LRT) | 56 | 22 (12 List\<Utf8\> + 10 List\<Struct\>) | 78 |
 | `law_edges` | 8 | — | 8 |
-| `legislation_text` (LAT) | 27 | — | 27 |
-| `amendment_annotations` | 7 | 1 (List\<Utf8\>) | 8 |
+| `legislation_text` (LAT) | 28 | — | 28 |
+| `amendment_annotations` | 8 | 1 (List\<Utf8\>) | 9 |
 
 ---
 
@@ -538,7 +547,7 @@ Used in: `duties`, `rights`, `responsibilities`, `powers`
    - Combines three annotation sources: C/I/E from LAT, F from LAT, F from AMD
    - Output: `data/legislation_text.parquet` (99K rows, 453 laws), `data/amendment_annotations.parquet` (22K rows, 140 laws), `data/annotation_totals.parquet` (136 laws)
    - FK match to LRT: 406/454 laws (89%); 48 unmatched are laws present in LAT but absent from LRT
-   - **Status: done**
+   - **Status: needs re-export** — schema revised to use three-column identity (`section_id` structural citation, `sort_key`, `position`), `heading` → `heading_group`, `section`/`article` → `provision`, annotation `source` column added, `UK_uksi_2016_1091` excluded
 
 ### Phase 3+: Multi-jurisdiction
 
