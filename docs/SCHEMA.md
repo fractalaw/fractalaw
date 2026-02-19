@@ -1,8 +1,8 @@
 # Fractalaw Schema Design
 
-**Version**: 0.1 (draft)
-**Date**: 2026-02-12
-**Status**: Design — not yet implemented in code
+**Version**: 0.2 (draft)
+**Date**: 2026-02-16
+**Status**: Design — Tables 1–2 not yet exported; Tables 3–4 exported to Parquet
 
 This document defines the three-tier data model for Fractalaw. It is the spec from which `fractalaw-core/src/schema.rs` will be implemented.
 
@@ -333,14 +333,16 @@ This table is the Fractalaw evolution of the [legl Airtable prototype](https://g
 
 | Column | Arrow Type | Nullable | Description |
 |--------|-----------|----------|-------------|
-| `law_name` | Utf8 | no | Parent law identifier (FK to LRT `legislation.name`) |
-| `position` | Int32 | no | **Document order index.** Monotonically increasing integer preserving the published order of sections within a law. See design note below. |
-| `section_id` | Utf8 | no | Unique ID within the law. Format: `{section_type}.{number}` e.g., `article.5`, `schedule.2.paragraph.3` |
+| `law_name` | Utf8 | no | Parent law identifier (FK to LRT `legislation.name`). Acronyms stripped from legacy Airtable IDs (see ID normalization below). |
+| `position` | Int32 | no | **Document order index.** Monotonically increasing integer (1-based) preserving the published order of sections within a law. |
+| `section_id` | Utf8 | no | Unique ID derived from the positional encoding in the source Airtable export. Format: `{law_name}_{part}_{heading}_{section}_{sub}_{para}_{extent}` with underscores as delimiters. Example: `UK_ukpga_1974_37_1__1_1_1__UK` (Part 1, Heading 1, Section 1, Sub-section 1, extent UK). Not a sort key — use `position` for document order. |
 | `section_type` | Utf8 | no | Structural type — see enum below |
-| `hierarchy_path` | Utf8 | no | Full path in document structure: `part.1/chapter.2/article.5` |
-| `depth` | Int32 | no | Depth in hierarchy (0 = title, 1 = part, 2 = chapter, etc.) |
+| `hierarchy_path` | Utf8 | yes | Slash-separated path in document structure: `part.1/heading.1/section.1/sub.1`. Empty string for root-level rows (e.g., `title`). |
+| `depth` | Int32 | no | Count of populated structural hierarchy levels (0 = title/root, 1 = part, 2 = heading within part, etc.). |
 
-> **Design note — document ordering**: The legl Airtable prototype attempted to encode published order into `section_id` numbering but this broke when UK laws contain parallel provisions for different territorial extents within the same numbering scheme. For example, a law might publish as: `reg.1, reg.2, reg.3(1)(a) [GB], reg.3(1)(b) [GB], reg.3(1)(a) [NI], reg.3(1)(b) [NI], reg.4`. Sorting by `section_id` alone collapses the GB and NI variants together (`3(1)(a) GB` next to `3(1)(a) NI`) losing the intended document flow. The `position` column resolves this: a simple integer assigned by the scraper in document-traversal order. To recover published order, `ORDER BY law_name, position`. The `section_id` remains the human-readable structural address but is not the sort key. This must be resolved before LAT implementation begins.
+> **Design note — document ordering**: The legl Airtable prototype encoded published order into positional `section_id` fields, but these break as sort keys when UK laws contain parallel provisions for different territorial extents within the same numbering scheme (e.g., `reg.3(1)(a) [GB]` and `reg.3(1)(a) [NI]`). The `position` column resolves this: an integer assigned in document-traversal order. To recover published order, `ORDER BY law_name, position`.
+
+> **Design note — ID normalization**: Legacy Airtable IDs carry acronym suffixes/prefixes (e.g., `UK_ukpga_1974_37_HSWA`, `UK_CMCHA_ukpga_2007_19`). All IDs are stripped to the canonical form `{JURISDICTION}_{type_code}_{year}_{number}` during export. Three patterns are handled: `UK_ACRO_type_year_num → UK_type_year_num`, `UK_type_year_num_ACRO → UK_type_year_num`, `UK_year_num_ACRO → UK_year_num`.
 
 ### 3.2 Structural Hierarchy
 
@@ -366,17 +368,17 @@ Normalised across jurisdictions. Each country's scraper maps its local terminolo
 | `title` | Document title | title | title | title | title | title | zagolovok |
 | `part` | Major division | part | part | Teil | del | kisim | chast |
 | `chapter` | Chapter | chapter | chapter | Kapitel | kapittel | bölüm | razdel |
+| `heading` | Section heading | heading | heading | Überschrift | — | başlık | — |
 | `section` | Section | section | — | Abschnitt | — | — | glava |
+| `sub_section` | Sub-section | sub-section | — | — | — | — | — |
 | `article` | Article / regulation | — | article/regulation | Artikel/§ | § | madde | stat'ya |
+| `sub_article` | Sub-article | — | sub-article | — | — | — | — |
 | `paragraph` | Paragraph | paragraph | paragraph | Absatz | ledd | fikra | abzats |
 | `sub_paragraph` | Sub-paragraph | sub-paragraph | sub-paragraph | — | — | bent | podpunkt |
-| `heading` | Section heading | heading | heading | Überschrift | — | başlık | — |
 | `schedule` | Schedule / annex | schedule | schedule | Anlage | vedlegg | ek | prilozhenie |
-| `amendment` | Amendment text | amendment | amendment | Änderung | — | geçici-madde | — |
 | `commencement` | Commencement provision | commencement | commencement | — | — | — | — |
-| `form` | Prescribed form | form | form | Formblatt | — | — | — |
 | `table` | Table | table | table | Tabelle | — | — | — |
-| `note` | Note / footnote | note | note | — | — | — | — |
+| `note` | Note / footnote / figure | note | note | — | — | — | — |
 | `signed` | Signatory block | signed | signed | — | — | — | — |
 
 ### 3.4 Content
@@ -420,32 +422,37 @@ One row per legislative change annotation. Links amendment footnotes to the LAT 
 
 This table is the Fractalaw evolution of the legl Airtable amendments table. UK legislation annotates changes using coded footnotes — `F` (textual amendments), `C` (modifications), `I` (commencements), `E` (extent/editorial). Each annotation has descriptive text explaining the change and applies to one or more sections of the law. The legl prototype provided a better browsing experience than legislation.gov.uk by surfacing these as a structured, navigable table alongside the article text.
 
+**Data sources** (combined during export via `data/export_lat.sql`):
+1. **LAT-*.csv** — C/I/E annotations from interleaved annotation rows (record types `commencement,content`, `modification,content`, `extent,content`, etc.)
+2. **LAT-*.csv** — F-code annotations from interleaved amendment rows (record types `amendment,textual`, `amendment,general`, etc.)
+3. **AMD-*.csv** — Additional F-code annotations from separate amendment files (16 files, ~12K rows, 104 laws, zero overlap with LAT F-code rows)
+
 **Legacy reference**: [`Legl.Countries.Uk.AirtableAmendment.Amendments`](https://github.com/shotleybuilder/legl/blob/main/lib/legl/countries/uk/airtable_amendment/uk_article_amendments.ex)
 
 ### 4.1 Identity
 
 | Column | Arrow Type | Nullable | Description | Legacy (legl) |
 |--------|-----------|----------|-------------|---------------|
-| `id` | Utf8 | no | Unique annotation ID. Format: `{law_name}_{code}` e.g., `UK_ukpga_1990_43_F123` | `ID` |
-| `law_name` | Utf8 | no | Parent law identifier (FK to LRT `legislation.name`) | derived from `opts.name` |
-| `code` | Utf8 | no | Annotation code from legislation.gov.uk: `F1`, `F123`, `C42`, `I7`, `E3` | `Ef Code` |
-| `code_type` | Utf8 | no | Category: `amendment`, `modification`, `commencement`, `extent_editorial` | derived from code prefix |
+| `id` | Utf8 | no | Unique annotation ID. Two formats depending on source: **F-code annotations** use `{law_name}_{code}` e.g., `UK_ukpga_1990_43_F123`. **C/I/E annotations** use the positional ID from the LAT source row e.g., `UK_ukpga_1974_37______ex_1` (suffix `_cx_N` for commencement, `_mx_N` for modification, `_ex_N` for extent). Codes are not globally unique per law (e.g., C36 may appear 39 times for HSWA 1974); the positional ID ensures uniqueness. | `ID` |
+| `law_name` | Utf8 | no | Parent law identifier (FK to LRT `legislation.name`). Acronyms stripped (see Table 3 ID normalization note). | derived from `opts.name` |
+| `code` | Utf8 | no | Annotation code from legislation.gov.uk: `F1`, `F123`, `C42`, `I7`, `E3`. Extracted from the annotation text or AMD `Ef Code` column. | `Ef Code` |
+| `code_type` | Utf8 | no | Category: `amendment`, `modification`, `commencement`, `extent_editorial` | derived from source record type |
 
 ### 4.2 Annotation Codes
 
-| `code_type` | Code Prefix | Source Record Type | Description |
+| `code_type` | Code Prefix | Source Record Types | Description |
 |-------------|------------|-------------------|-------------|
-| `amendment` | F | `amendment,textual` | Textual amendments — words substituted, inserted, omitted, repealed |
+| `amendment` | F | `amendment,textual` / `amendment,general` / `amendment,repeal` + AMD-*.csv | Textual amendments — words substituted, inserted, omitted, repealed. Sourced from both LAT annotation rows and separate AMD CSV files. |
 | `modification` | C | `modification,content` | Modifications to how provisions apply |
 | `commencement` | I | `commencement,content` | Commencement of provisions (bringing into force) |
-| `extent_editorial` | E | `editorial,content` / `extent,content` | Editorial notes and extent annotations |
+| `extent_editorial` | E | `extent,content` / `editorial,content` / `subordinate,content` | Editorial notes, extent annotations, and subordinate legislation references |
 
 ### 4.3 Content
 
 | Column | Arrow Type | Nullable | Description | Legacy (legl) |
 |--------|-----------|----------|-------------|---------------|
 | `text` | Utf8 | no | The annotation text describing the change (e.g., "S. 5(1) substituted (1.4.2015) by ...") | `Text` |
-| `affected_sections` | List\<Utf8\> | yes | LAT `section_id` values affected by this annotation. Built by scanning each LAT record's text for the annotation code. | `Articles` |
+| `affected_sections` | List\<Utf8\> | yes | LAT `section_id` values affected by this annotation. Linkage mechanism depends on annotation type (see design note below). | `Articles` |
 
 ### 4.4 Metadata
 
@@ -454,7 +461,13 @@ This table is the Fractalaw evolution of the legl Airtable amendments table. UK 
 | `created_at` | Timestamp(ns, UTC) | no | Record creation time |
 | `updated_at` | Timestamp(ns, UTC) | no | Last update time |
 
-> **Design note**: In the legl prototype, the `Articles` field was built by scanning each LAT record's text for F-code markers and collecting matching record IDs. The same approach applies here — during scraping/import, after LAT records are populated, a second pass scans their text for annotation code references (e.g., `F123`) and populates `affected_sections` with the corresponding `section_id` values. This inverted index enables both directions: from an annotation to the sections it touches, and from a LAT section's annotation counts (section 3.5) back to the full annotation text.
+> **Design note — affected_sections linkage**: The `affected_sections` list is built differently depending on the annotation source:
+>
+> - **C/I/E annotations** (from LAT rows): These annotation rows have positional IDs like `{parent_section_id}_cx_N`. The parent content section is recovered by stripping the suffix, giving a direct 1:1 linkage.
+> - **F-code annotations from LAT**: Content rows carry a `Changes` column listing F-codes (e.g., `"F3,F2,F1"`). This is inverted during export: each code maps back to the content `section_id` that references it.
+> - **F-code annotations from AMD-*.csv**: The `Articles` column contains comma-separated `section_id` cross-references directly.
+>
+> This enables both directions: from an annotation to the sections it touches, and from a LAT section's annotation counts (section 3.5) back to the full annotation text. ~7% of F-code annotations have no `affected_sections` due to data gaps in the source exports.
 
 ---
 
@@ -504,29 +517,28 @@ Used in: `duties`, `rights`, `responsibilities`, `powers`
 
 ## Migration Path (Legacy → Fractalaw)
 
-### Phase 1: Static export from PostgreSQL
+### Phase 1: Static export
 
-1. **Export `uk_lrt` → Parquet** (Elixir mix task in sertantai-legal)
-   - Map columns per this schema
-   - Set `jurisdiction = "UK"`, `source_authority = "legislation.gov.uk"`, `language = "en"`
-   - Convert `text[]` arrays to JSON arrays (Parquet supports nested types)
-   - Flatten `*_stats_per_law` JSONB into `RelatedLaw` struct arrays
-   - Generate `source_url` from `type_code`, `year`, `number`
+1. **Export `uk_lrt` → Parquet** — `data/export_lrt.sql` (DuckDB)
+   - Source: legacy PostgreSQL `uk_lrt` table exported to CSV
+   - Maps columns per this schema
+   - Sets `jurisdiction = "UK"`, `source_authority = "legislation.gov.uk"`, `language = "en"`
+   - Output: `data/legislation.parquet` (19K+ rows)
+   - **Status: done**
 
 2. **Derive `law_edges` from exported LRT**
    - Expand each `List<Struct>` relationship column into edge rows
    - Expand `*_stats_per_law` detail into article-level edge rows
+   - **Status: pending**
 
-3. **Export text content → LAT Parquet** (for LanceDB)
-   - Source: existing `md_description` + article-level text from taxa parsing
-   - One row per structural unit with hierarchy position
-   - Assign `position` integers in document-traversal order
-   - `embedding` column null (populated in Phase 2)
-
-4. **Derive `amendment_annotations` from LAT** (for LanceDB)
-   - Extract F/C/I/E annotation records from parsed legislation text
-   - Scan LAT records for annotation code references to build `affected_sections`
-   - Co-located with LAT in LanceDB
+3. **Export LAT + annotations → Parquet** — `data/export_lat.sql` (DuckDB)
+   - Source: 17 LAT-*.csv files (~115K rows, 460 laws) + 16 AMD-*.csv files (~12K rows, 104 laws)
+   - Strips legacy acronyms from all ID columns
+   - Separates content rows (→ `legislation_text`) from annotation rows (→ `amendment_annotations`)
+   - Combines three annotation sources: C/I/E from LAT, F from LAT, F from AMD
+   - Output: `data/legislation_text.parquet` (99K rows, 453 laws), `data/amendment_annotations.parquet` (22K rows, 140 laws), `data/annotation_totals.parquet` (136 laws)
+   - FK match to LRT: 406/454 laws (89%); 48 unmatched are laws present in LAT but absent from LRT
+   - **Status: done**
 
 ### Phase 3+: Multi-jurisdiction
 

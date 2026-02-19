@@ -22,7 +22,7 @@ arrow = { version = "57", features = ["ipc"] }
 # These require C/C++ toolchain — gated behind features
 datafusion = "52"
 lancedb = "0.26"
-duckdb = { version = "1.4", features = ["bundled"] }
+duckdb = { git = "https://github.com/duckdb/duckdb-rs", rev = "a2639608", features = ["bundled"] }
 ort = "2.0.0-rc.11"
 
 # WebAssembly host (pure Rust + Cranelift)
