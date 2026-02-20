@@ -387,7 +387,7 @@ Normalised across jurisdictions. Each country's scraper maps its local terminolo
 
 | Column | Arrow Type | Nullable | Description |
 |--------|-----------|----------|-------------|
-| `text` | Utf8 | no | The legal text content of this structural unit |
+| `text` | Utf8 | no | The legal text content of this structural unit. Note: 2,338 content rows (2.4%) have text starting with F-code markers (e.g., `F1 The amended text...`) — these are sections whose original text was entirely replaced by an amendment. A future phase may strip these with `^[FCIE][0-9]+\s*`. |
 | `language` | Utf8 | no | Language code: `en`, `de`, `fr`, `no`, `sv`, `fi`, `tr`, `ru` |
 | `extent_code` | Utf8 | yes | Territorial extent at this article level (e.g., `E+W` for a section that applies only to England and Wales). Same encoding as `legislation.extent_code`. |
 
@@ -408,6 +408,8 @@ Normalised across jurisdictions. Each country's scraper maps its local terminolo
 | `embedding` | FixedSizeList\<Float32, 384\> | yes | Semantic embedding vector. Null until ONNX integration (Phase 2). Dimension 384 = all-MiniLM-L6-v2 or similar small model. |
 | `embedding_model` | Utf8 | yes | Model used to generate embedding: `all-MiniLM-L6-v2`, etc. |
 | `embedded_at` | Timestamp(ns, UTC) | yes | When embedding was generated |
+
+> **Note**: If `section_id` values are used as document IDs in the LanceDB vector index, the index must be regenerated whenever `section_id` encoding changes. Since embeddings are not yet populated, this has zero cost now — but should be considered before any future `section_id` format changes.
 
 ### 3.7 Migration
 
@@ -434,6 +436,8 @@ This table is the Fractalaw evolution of the legl Airtable amendments table. UK 
 1. **LAT-*.csv** — C/I/E annotations from interleaved annotation rows (record types `commencement,content`, `modification,content`, `extent,content`, etc.)
 2. **LAT-*.csv** — F-code annotations from interleaved amendment rows (record types `amendment,textual`, `amendment,general`, etc.)
 3. **AMD-*.csv** — Additional F-code annotations from separate amendment files (16 files, ~12K rows, 104 laws, zero overlap with LAT F-code rows)
+
+Note: ~5,960 annotation heading rows (record types `commencement,heading`, `modification,heading`, etc.) are dropped during export. These are grouping labels from the legislation.gov.uk rendering (e.g., "Commencement Information") that carry no data beyond what `code_type` provides.
 
 **Legacy reference**: [`Legl.Countries.Uk.AirtableAmendment.Amendments`](https://github.com/shotleybuilder/legl/blob/main/lib/legl/countries/uk/airtable_amendment/uk_article_amendments.ex)
 

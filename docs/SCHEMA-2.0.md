@@ -1,5 +1,7 @@
 # LAT Schema Critical Review
 
+> **Superseded** — This review identified problems that have been resolved. The current schema spec is [`SCHEMA.md`](SCHEMA.md) v0.3. Design rationale and implementation details are in the session doc [`.claude/sessions/02-19-26-LAT-schema.md`](../.claude/sessions/02-19-26-LAT-schema.md). The §1.4 recommendation (`{law_name}:{position}`) was rejected in favour of citation-based IDs — see session doc §"Design Decision: Section Identity and Ordering" for why. All 9 recommendations were resolved; see the deviations table in SCHEMA.md §"Migration Path".
+
 **Date**: 2026-02-16
 **Scope**: Tables 3 (`legislation_text`) and 4 (`amendment_annotations`) as prototyped in Airtable and exported via `export_lat.sql`
 **Method**: Empirical analysis of the exported Parquet files (99,113 content rows, 21,929 annotation rows, 453 UK laws)
