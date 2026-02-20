@@ -95,6 +95,16 @@ enum Command {
         model_dir: PathBuf,
     },
 
+    /// Classify legislation by domain/family/subjects using centroid-based classification
+    Classify {
+        /// Domain similarity threshold (0.0–1.0)
+        #[arg(long, default_value_t = 0.5)]
+        domain_threshold: f32,
+        /// Subject similarity threshold (0.0–1.0)
+        #[arg(long, default_value_t = 0.3)]
+        subject_threshold: f32,
+    },
+
     /// Import (or re-import) Parquet files into persistent DuckDB
     Import,
 }
@@ -118,6 +128,18 @@ async fn main() -> anyhow::Result<()> {
         Command::Stats => cmd_stats(&open_duck(&data_dir)?),
         Command::Validate { model_dir } => {
             cmd_validate(&open_duck(&data_dir)?, &data_dir, &model_dir).await
+        }
+        Command::Classify {
+            domain_threshold,
+            subject_threshold,
+        } => {
+            cmd_classify(
+                &open_duck(&data_dir)?,
+                &data_dir,
+                domain_threshold,
+                subject_threshold,
+            )
+            .await
         }
         Command::Import => cmd_import(&data_dir),
 
@@ -314,7 +336,7 @@ async fn cmd_validate(
     println!("=== Validation ===\n");
 
     let mut passed = 0u32;
-    let total_checks = 5u32;
+    let mut total_checks = 5u32;
 
     // ── Check 1: Row counts ──
     let lance_count = lance.legislation_text_count().await?;
@@ -502,6 +524,114 @@ async fn cmd_validate(
         );
     }
 
+    // ── Classification checks ──
+    // Only run if classification has been performed (columns exist).
+    let has_classification = store
+        .query_arrow(
+            "SELECT count(*)::BIGINT FROM information_schema.columns \
+             WHERE table_name = 'legislation' AND column_name = 'classified_family'",
+        )
+        .ok()
+        .and_then(|b| {
+            b.first()?
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .map(|a| a.value(0) > 0)
+        })
+        .unwrap_or(false);
+
+    if has_classification {
+        println!("\n  --- Classification ---");
+        total_checks += 4;
+
+        // ── Check 6: Classification coverage ──
+        let batches = store.query_arrow(
+            "SELECT count(*) FILTER (WHERE classified_family IS NOT NULL)::BIGINT AS classified, \
+             count(*)::BIGINT AS total \
+             FROM legislation",
+        )?;
+        let classified = extract_i64(&batches[0], 0);
+        let total_leg = extract_i64(&batches[0], 1);
+
+        if classified > 0 {
+            println!(
+                "  [PASS] Classification coverage: {} / {} laws ({:.1}%)",
+                fmt_num(classified as usize),
+                fmt_num(total_leg as usize),
+                classified as f64 / total_leg as f64 * 100.0
+            );
+            passed += 1;
+        } else {
+            println!("  [FAIL] Classification coverage: 0 laws classified");
+        }
+
+        // ── Check 7: Confidence distribution ──
+        let batches = store.query_arrow(
+            "SELECT avg(classification_confidence) AS mean_conf, \
+                    median(classification_confidence) AS median_conf, \
+                    percentile_cont(0.1) WITHIN GROUP (ORDER BY classification_confidence) AS p10_conf \
+             FROM legislation \
+             WHERE classification_confidence IS NOT NULL",
+        )?;
+        let mean_c = extract_f64(&batches[0], 0);
+        let median_c = extract_f64(&batches[0], 1);
+        let p10_c = extract_f64(&batches[0], 2);
+
+        if mean_c > 0.0 {
+            println!(
+                "  [PASS] Confidence distribution: mean={mean_c:.3}, median={median_c:.3}, p10={p10_c:.3}"
+            );
+            passed += 1;
+        } else {
+            println!("  [FAIL] Confidence distribution: no confidence scores found");
+        }
+
+        // ── Check 8: Agreement with ground truth ──
+        let batches = store.query_arrow(
+            "SELECT count(*) FILTER (WHERE classification_status = 'confirmed')::BIGINT AS agreed, \
+             count(*) FILTER (WHERE classification_status IN ('confirmed', 'conflict'))::BIGINT AS with_gt \
+             FROM legislation",
+        )?;
+        let agreed = extract_i64(&batches[0], 0);
+        let with_gt = extract_i64(&batches[0], 1);
+        let rate = if with_gt > 0 {
+            agreed as f64 / with_gt as f64 * 100.0
+        } else {
+            0.0
+        };
+
+        println!(
+            "  [PASS] Ground-truth agreement: {} / {} ({:.1}%)",
+            fmt_num(agreed as usize),
+            fmt_num(with_gt as usize),
+            rate
+        );
+        passed += 1;
+
+        // ── Check 9: Subject revival (post-2013 laws with predicted subjects) ──
+        let batches = store.query_arrow(
+            "SELECT count(*) FILTER (\
+                WHERE classified_subjects IS NOT NULL \
+                AND len(classified_subjects) > 0 \
+                AND year > 2013\
+             )::BIGINT AS revived, \
+             count(*) FILTER (WHERE year > 2013)::BIGINT AS post_2013 \
+             FROM legislation",
+        )?;
+        let revived = extract_i64(&batches[0], 0);
+        let post_2013 = extract_i64(&batches[0], 1);
+
+        println!(
+            "  [PASS] Subject revival: {} / {} post-2013 laws have predicted subjects",
+            fmt_num(revived as usize),
+            fmt_num(post_2013 as usize),
+        );
+        passed += 1;
+    } else {
+        println!("\n  [SKIP] Classification checks (run `fractalaw classify` first)");
+    }
+
     // ── Summary ──
     println!("\n=== {passed}/{total_checks} checks passed ===");
 
@@ -573,6 +703,231 @@ fn cmd_stats(store: &DuckStore) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn cmd_classify(
+    store: &DuckStore,
+    data_dir: &std::path::Path,
+    domain_threshold: f32,
+    subject_threshold: f32,
+) -> anyhow::Result<()> {
+    use fractalaw_ai::{ClassificationStatus, Classifier, LabelSet, aggregate_law_embeddings};
+    use futures::TryStreamExt;
+    use lancedb::query::{ExecutableQuery, QueryBase, Select};
+
+    println!("=== Classification Pipeline ===\n");
+
+    // Step 1: Load labels from legislation table.
+    println!("Loading label sets...");
+    let label_batches =
+        store.query_arrow("SELECT name, domain, family, sub_family, subjects FROM legislation")?;
+    let labels = LabelSet::from_legislation_batches(&label_batches)?;
+    let lsummary = labels.summary();
+    println!(
+        "  {} laws with family labels, {} with domain, {} with subjects",
+        fmt_num(lsummary.with_family),
+        fmt_num(lsummary.with_domain),
+        fmt_num(lsummary.with_subjects),
+    );
+
+    // Step 2: Load embeddings from LanceDB (only law_name + embedding columns).
+    println!("Loading embeddings from LanceDB...");
+    let lance = LanceStore::open(&data_dir.join("lancedb"))
+        .await
+        .context("opening LanceDB")?;
+    let table = lance.legislation_text().await?;
+    let query = table.query().select(Select::Columns(vec![
+        "law_name".to_string(),
+        "embedding".to_string(),
+    ]));
+    let stream = query
+        .execute()
+        .await
+        .map_err(|e| anyhow::anyhow!("lance query: {e}"))?;
+    let emb_batches: Vec<RecordBatch> = stream
+        .try_collect()
+        .await
+        .map_err(|e| anyhow::anyhow!("lance collect: {e}"))?;
+
+    let total_sections: usize = emb_batches.iter().map(|b: &RecordBatch| b.num_rows()).sum();
+
+    // Step 3: Aggregate to law-level embeddings.
+    println!("Aggregating section embeddings → law-level...");
+    let law_embeddings = aggregate_law_embeddings(&emb_batches)?;
+    println!(
+        "  {} laws with embeddings (from {} sections)",
+        fmt_num(law_embeddings.len()),
+        fmt_num(total_sections),
+    );
+    drop(emb_batches); // Free memory.
+
+    if law_embeddings.is_empty() {
+        println!("\nNo laws with embeddings found. Run `fractalaw embed` first.");
+        return Ok(());
+    }
+
+    // Step 4: Build classifier (compute centroids).
+    println!("Computing centroids...");
+    let classifier = Classifier::build(&law_embeddings, &labels);
+    let csummary = classifier.summary(law_embeddings.len());
+    println!("  domain:   {} centroids", csummary.domain_count);
+    println!("  family:   {} centroids", csummary.family_count);
+    println!("  subjects: {} centroids", csummary.subject_count);
+
+    // Step 5: Classify all laws with embeddings.
+    println!(
+        "Classifying {} laws (domain_threshold={domain_threshold}, subject_threshold={subject_threshold})...",
+        law_embeddings.len()
+    );
+    let results = classifier.classify_batch(
+        &law_embeddings,
+        &labels,
+        domain_threshold,
+        subject_threshold,
+    );
+
+    // Count statuses.
+    let predicted = results
+        .iter()
+        .filter(|c| c.status == ClassificationStatus::Predicted)
+        .count();
+    let confirmed = results
+        .iter()
+        .filter(|c| c.status == ClassificationStatus::Confirmed)
+        .count();
+    let conflicts = results
+        .iter()
+        .filter(|c| c.status == ClassificationStatus::Conflict)
+        .count();
+
+    let mean_conf: f32 = if results.is_empty() {
+        0.0
+    } else {
+        results.iter().map(|c| c.family_confidence).sum::<f32>() / results.len() as f32
+    };
+
+    let with_subjects = results.iter().filter(|c| !c.subjects.is_empty()).count();
+
+    println!("  predicted:  {} (no ground truth)", fmt_num(predicted));
+    println!("  confirmed:  {} (AI agrees)", fmt_num(confirmed));
+    println!("  conflict:   {} (AI disagrees)", fmt_num(conflicts));
+    println!("  with subjects: {}", fmt_num(with_subjects));
+    println!("  mean family confidence: {mean_conf:.3}");
+
+    // Step 6: Write to DuckDB.
+    println!("\nWriting to DuckDB...");
+    write_classifications(store, &results)?;
+    println!("  {} rows updated", fmt_num(results.len()));
+
+    // Print conflict report if any.
+    if conflicts > 0 {
+        println!("\n--- Conflicts (top 20 by confidence) ---\n");
+        let conflict_batches = store.query_arrow(
+            "SELECT name, family, classified_family, \
+                    round(classification_confidence, 3) AS confidence \
+             FROM legislation \
+             WHERE classification_status = 'conflict' \
+             ORDER BY classification_confidence DESC \
+             LIMIT 20",
+        )?;
+        print_batches(&conflict_batches)?;
+    }
+
+    println!("\n=== Done ===");
+    Ok(())
+}
+
+/// Write classification results to DuckDB legislation table.
+fn write_classifications(
+    store: &DuckStore,
+    results: &[fractalaw_ai::Classification],
+) -> anyhow::Result<()> {
+    // Add columns (idempotent).
+    let columns = [
+        ("classified_domain", "VARCHAR[]"),
+        ("classified_family", "VARCHAR"),
+        ("classified_subjects", "VARCHAR[]"),
+        ("classification_confidence", "FLOAT"),
+        ("classification_model", "VARCHAR"),
+        ("classified_at", "TIMESTAMPTZ"),
+        ("classification_status", "VARCHAR"),
+    ];
+
+    for (col, dtype) in &columns {
+        store.execute(&format!(
+            "ALTER TABLE legislation ADD COLUMN IF NOT EXISTS {col} {dtype}"
+        ))?;
+    }
+
+    // Create temp table for batch update.
+    store.execute("DROP TABLE IF EXISTS _tmp_classifications")?;
+    store.execute(
+        "CREATE TEMP TABLE _tmp_classifications (\
+            name VARCHAR, \
+            classified_domain VARCHAR[], \
+            classified_family VARCHAR, \
+            classified_subjects VARCHAR[], \
+            classification_confidence FLOAT, \
+            classification_model VARCHAR, \
+            classified_at TIMESTAMPTZ, \
+            classification_status VARCHAR\
+        )",
+    )?;
+
+    // Insert in chunks to avoid overly long SQL statements.
+    for chunk in results.chunks(100) {
+        let mut sql = String::from("INSERT INTO _tmp_classifications VALUES ");
+        for (i, c) in chunk.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+
+            let name_esc = c.law_name.replace('\'', "''");
+            let family_esc = c.family.replace('\'', "''");
+            let domain_arr = format_sql_list(c.domain.iter().map(|(d, _)| d.as_str()));
+            let subjects_arr = format_sql_list(c.subjects.iter().map(|(s, _)| s.as_str()));
+
+            sql.push_str(&format!(
+                "('{}', {}, '{}', {}, {}, 'centroid-v1', CURRENT_TIMESTAMP, '{}')",
+                name_esc,
+                domain_arr,
+                family_esc,
+                subjects_arr,
+                c.family_confidence,
+                c.status.as_str(),
+            ));
+        }
+        store.execute(&sql)?;
+    }
+
+    // Bulk update from temp table.
+    store.execute(
+        "UPDATE legislation SET \
+            classified_domain = c.classified_domain, \
+            classified_family = c.classified_family, \
+            classified_subjects = c.classified_subjects, \
+            classification_confidence = c.classification_confidence, \
+            classification_model = c.classification_model, \
+            classified_at = c.classified_at, \
+            classification_status = c.classification_status \
+        FROM _tmp_classifications c \
+        WHERE legislation.name = c.name",
+    )?;
+
+    store.execute("DROP TABLE IF EXISTS _tmp_classifications")?;
+    Ok(())
+}
+
+/// Format an iterator of strings as a DuckDB array literal: `['a', 'b']` or `NULL`.
+fn format_sql_list<'a>(values: impl Iterator<Item = &'a str>) -> String {
+    let items: Vec<String> = values
+        .map(|v| format!("'{}'", v.replace('\'', "''")))
+        .collect();
+    if items.is_empty() {
+        "NULL".to_string()
+    } else {
+        format!("[{}]", items.join(", "))
+    }
+}
+
 /// Project RecordBatches to only include the specified columns.
 fn project_batches(batches: &[RecordBatch], columns: &[&str]) -> Vec<RecordBatch> {
     batches
@@ -603,6 +958,30 @@ fn fmt_num(n: usize) -> String {
         result.push(c);
     }
     result.chars().rev().collect()
+}
+
+/// Extract an i64 value from column `col_idx` of a RecordBatch.
+fn extract_i64(batch: &RecordBatch, col_idx: usize) -> i64 {
+    batch
+        .column(col_idx)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .map(|a| a.value(0))
+        .unwrap_or(0)
+}
+
+/// Extract an f64 value from column `col_idx` of a RecordBatch.
+///
+/// Handles both Float64 (DuckDB aggregates) and Float32 columns.
+fn extract_f64(batch: &RecordBatch, col_idx: usize) -> f64 {
+    let col = batch.column(col_idx);
+    if let Some(a) = col.as_any().downcast_ref::<arrow::array::Float64Array>() {
+        a.value(0)
+    } else if let Some(a) = col.as_any().downcast_ref::<arrow::array::Float32Array>() {
+        a.value(0) as f64
+    } else {
+        0.0
+    }
 }
 
 /// Extract a string value from an Arrow array, handling both Utf8 and LargeUtf8.

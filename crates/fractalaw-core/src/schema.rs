@@ -109,7 +109,7 @@ pub mod esh {
             Field::new("amended_by", list_related_law.clone(), true),
             Field::new("rescinding", list_related_law.clone(), true),
             Field::new("rescinded_by", list_related_law, true),
-            // 1.8 Amendment Statistics (7)
+            // 1.9 Amendment Statistics (7)
             Field::new("self_affects_count", DataType::Int32, true),
             Field::new("affects_count", DataType::Int32, true),
             Field::new("affected_laws_count", DataType::Int32, true),
@@ -117,26 +117,34 @@ pub mod esh {
             Field::new("affected_by_laws_count", DataType::Int32, true),
             Field::new("rescinding_laws_count", DataType::Int32, true),
             Field::new("rescinded_by_laws_count", DataType::Int32, true),
-            // 1.9 DRRP Taxa (11)
+            // 1.10 DRRP Taxa (11)
             Field::new("duty_holder", list_utf8.clone(), true),
             Field::new("rights_holder", list_utf8.clone(), true),
             Field::new("responsibility_holder", list_utf8.clone(), true),
             Field::new("power_holder", list_utf8.clone(), true),
             Field::new("duty_type", list_utf8.clone(), true),
             Field::new("role", list_utf8.clone(), true),
-            Field::new("role_gvt", list_utf8, true),
+            Field::new("role_gvt", list_utf8.clone(), true),
             Field::new("duties", list_drrp_entry.clone(), true),
             Field::new("rights", list_drrp_entry.clone(), true),
             Field::new("responsibilities", list_drrp_entry.clone(), true),
             Field::new("powers", list_drrp_entry, true),
-            // 1.10 Annotation Totals (4)
+            // 1.11 Annotation Totals (4)
             Field::new("total_text_amendments", DataType::Int32, true),
             Field::new("total_modifications", DataType::Int32, true),
             Field::new("total_commencements", DataType::Int32, true),
             Field::new("total_extents", DataType::Int32, true),
-            // 1.11 Change Logs (1)
+            // 1.12 Change Logs (1)
             Field::new("change_log", DataType::Utf8, true),
-            // 1.12 Timestamps (2)
+            // 1.13 AI Classification (7)
+            Field::new("classified_domain", list_utf8.clone(), true),
+            Field::new("classified_family", DataType::Utf8, true),
+            Field::new("classified_subjects", list_utf8, true),
+            Field::new("classification_confidence", DataType::Float32, true),
+            Field::new("classification_model", DataType::Utf8, true),
+            Field::new("classified_at", timestamp_ns_utc(), true),
+            Field::new("classification_status", DataType::Utf8, true),
+            // 1.14 Timestamps (2)
             Field::new("created_at", timestamp_ns_utc(), false),
             Field::new("updated_at", timestamp_ns_utc(), false),
         ])
@@ -273,7 +281,7 @@ mod tests {
 
     #[test]
     fn legislation_schema_field_count() {
-        assert_eq!(esh::legislation_schema().fields().len(), 78);
+        assert_eq!(esh::legislation_schema().fields().len(), 85);
     }
 
     #[test]
@@ -484,6 +492,52 @@ mod tests {
                 },
                 other => panic!("{col}: expected List, got {other:?}"),
             }
+        }
+    }
+
+    // ── AI Classification columns ──
+
+    #[test]
+    fn legislation_has_classification_columns() {
+        let schema = esh::legislation_schema();
+        assert!(schema.field_with_name("classified_domain").is_ok());
+        assert!(schema.field_with_name("classified_family").is_ok());
+        assert!(schema.field_with_name("classified_subjects").is_ok());
+        assert!(schema.field_with_name("classification_confidence").is_ok());
+        assert!(schema.field_with_name("classification_model").is_ok());
+        assert!(schema.field_with_name("classified_at").is_ok());
+        assert!(schema.field_with_name("classification_status").is_ok());
+    }
+
+    #[test]
+    fn classified_domain_is_list_utf8() {
+        let schema = esh::legislation_schema();
+        let field = schema.field_with_name("classified_domain").unwrap();
+        assert!(field.is_nullable());
+        match field.data_type() {
+            DataType::List(inner) => {
+                assert_eq!(*inner.data_type(), DataType::Utf8);
+            }
+            other => panic!("expected List<Utf8>, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classification_columns_all_nullable() {
+        let schema = esh::legislation_schema();
+        for col in [
+            "classified_domain",
+            "classified_family",
+            "classified_subjects",
+            "classification_confidence",
+            "classification_model",
+            "classified_at",
+            "classification_status",
+        ] {
+            assert!(
+                schema.field_with_name(col).unwrap().is_nullable(),
+                "{col} should be nullable"
+            );
         }
     }
 }

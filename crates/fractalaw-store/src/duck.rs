@@ -182,6 +182,14 @@ impl DuckStore {
 
     // ── Escape hatch ──
 
+    /// Execute a DDL/DML statement that returns no result set.
+    ///
+    /// Use for `ALTER TABLE`, `UPDATE`, `INSERT`, `CREATE TEMP TABLE`, etc.
+    pub fn execute(&self, sql: &str) -> Result<(), StoreError> {
+        self.conn.execute_batch(sql)?;
+        Ok(())
+    }
+
     /// Execute arbitrary SQL and return Arrow RecordBatches.
     pub fn query_arrow(&self, sql: &str) -> Result<Vec<RecordBatch>, StoreError> {
         let mut stmt = self.conn.prepare(sql)?;
