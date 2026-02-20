@@ -85,6 +85,9 @@ enum Command {
         #[arg(long, default_value = "./models/all-MiniLM-L6-v2")]
         model_dir: PathBuf,
     },
+
+    /// Import (or re-import) Parquet files into persistent DuckDB
+    Import,
 }
 
 #[tokio::main]
@@ -98,14 +101,18 @@ async fn main() -> anyhow::Result<()> {
         .canonicalize()
         .with_context(|| format!("data directory '{}' not found", cli.data_dir.display()))?;
 
-    let store = DuckStore::open()?;
-    store.load_all(&data_dir)?;
-
     match cli.command {
-        Command::Query { sql } => cmd_query(&store, &sql).await,
-        Command::Law { name } => cmd_law(&store, &name),
-        Command::Graph { name, hops } => cmd_graph(&store, &name, hops),
-        Command::Stats => cmd_stats(&store),
+        // DuckDB commands — open persistent store with auto-import on first run.
+        Command::Query { sql } => cmd_query(&open_duck(&data_dir)?, &sql).await,
+        Command::Law { name } => cmd_law(&open_duck(&data_dir)?, &name),
+        Command::Graph { name, hops } => cmd_graph(&open_duck(&data_dir)?, &name, hops),
+        Command::Stats => cmd_stats(&open_duck(&data_dir)?),
+        Command::Validate { model_dir } => {
+            cmd_validate(&open_duck(&data_dir)?, &data_dir, &model_dir).await
+        }
+        Command::Import => cmd_import(&data_dir),
+
+        // LanceDB-only commands — no DuckDB needed.
         Command::Embed { model_dir } => cmd_embed(&data_dir, &model_dir).await,
         Command::Text { name, limit } => cmd_text(&data_dir, &name, limit).await,
         Command::Search {
@@ -113,8 +120,34 @@ async fn main() -> anyhow::Result<()> {
             limit,
             model_dir,
         } => cmd_search(&data_dir, &query, limit, &model_dir).await,
-        Command::Validate { model_dir } => cmd_validate(&store, &data_dir, &model_dir).await,
     }
+}
+
+/// Open persistent DuckDB, auto-importing from Parquet on first run.
+fn open_duck(data_dir: &std::path::Path) -> anyhow::Result<DuckStore> {
+    let db_path = data_dir.join("fractalaw.duckdb");
+    let store = DuckStore::open_persistent(&db_path)?;
+    if !store.has_tables() {
+        eprintln!(
+            "First run — importing Parquet into {}...",
+            db_path.display()
+        );
+        store.load_all(data_dir)?;
+    }
+    Ok(store)
+}
+
+fn cmd_import(data_dir: &std::path::Path) -> anyhow::Result<()> {
+    let db_path = data_dir.join("fractalaw.duckdb");
+    let store = DuckStore::open_persistent(&db_path)?;
+    store.load_all(data_dir)?;
+    println!(
+        "Imported into {}\n  Legislation: {:>8} rows\n  Law edges:   {:>8} rows",
+        db_path.display(),
+        fmt_num(store.legislation_count()?),
+        fmt_num(store.law_edges_count()?),
+    );
+    Ok(())
 }
 
 async fn cmd_query(store: &DuckStore, sql: &str) -> anyhow::Result<()> {

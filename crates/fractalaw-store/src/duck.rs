@@ -8,13 +8,17 @@ use tracing::info;
 
 use crate::StoreError;
 
-/// In-memory DuckDB store for legislation and law_edges tables.
+/// DuckDB store for legislation hot path and analytical path.
 ///
 /// The hot path (`legislation` table) stores one row per law with 78 columns
 /// including `List<Struct>` relationship arrays — single-row lookups need no joins.
 ///
 /// The analytical path (`law_edges` table) is a flattened edge table for
 /// vectorised joins and multi-hop graph traversal.
+///
+/// Supports both in-memory (ephemeral) and persistent (file-backed) modes.
+/// Use [`open`](Self::open) for in-memory and [`open_persistent`](Self::open_persistent)
+/// for file-backed storage that survives across process restarts.
 pub struct DuckStore {
     conn: Connection,
 }
@@ -24,6 +28,21 @@ impl DuckStore {
     pub fn open() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
         Ok(Self { conn })
+    }
+
+    /// Open or create a persistent DuckDB database at the given path.
+    ///
+    /// If the file already exists, tables are available immediately without
+    /// re-importing from Parquet. Use [`has_tables`](Self::has_tables) to check
+    /// whether import is needed.
+    pub fn open_persistent(path: &Path) -> Result<Self, StoreError> {
+        let conn = Connection::open(path)?;
+        Ok(Self { conn })
+    }
+
+    /// Check whether `legislation` and `law_edges` tables exist and are non-empty.
+    pub fn has_tables(&self) -> bool {
+        self.legislation_count().is_ok() && self.law_edges_count().is_ok()
     }
 
     /// Load `legislation.parquet` into the `legislation` table.
@@ -325,5 +344,69 @@ mod tests {
             .unwrap();
         assert_eq!(batches[0].num_rows(), 5);
         assert_eq!(batches[0].num_columns(), 2);
+    }
+
+    // ── Persistent storage tests ──
+
+    #[test]
+    fn open_persistent_creates_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.duckdb");
+        assert!(!db_path.exists());
+
+        let store = DuckStore::open_persistent(&db_path).unwrap();
+        // File is created on open.
+        assert!(db_path.exists());
+        // No tables yet.
+        assert!(!store.has_tables());
+    }
+
+    #[test]
+    fn persistent_load_and_reopen() {
+        let dir = require_data();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.duckdb");
+
+        // First open: import from Parquet.
+        let store = DuckStore::open_persistent(&db_path).unwrap();
+        assert!(!store.has_tables());
+        store.load_all(&dir).unwrap();
+        assert!(store.has_tables());
+        let leg_count = store.legislation_count().unwrap();
+        let edge_count = store.law_edges_count().unwrap();
+        drop(store);
+
+        // Second open: tables already present, no import needed.
+        let store = DuckStore::open_persistent(&db_path).unwrap();
+        assert!(store.has_tables());
+        assert_eq!(store.legislation_count().unwrap(), leg_count);
+        assert_eq!(store.law_edges_count().unwrap(), edge_count);
+    }
+
+    #[test]
+    fn persistent_queries_work() {
+        let dir = require_data();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.duckdb");
+
+        let store = DuckStore::open_persistent(&db_path).unwrap();
+        store.load_all(&dir).unwrap();
+        drop(store);
+
+        // Reopen and run queries against persisted data.
+        let store = DuckStore::open_persistent(&db_path).unwrap();
+        let batch = store.get_legislation("UK_ukpga_1974_37").unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.num_columns(), 78);
+
+        let edges = store.edges_for_law("UK_ukpga_1974_37").unwrap();
+        let total_edges: usize = edges.iter().map(|b| b.num_rows()).sum();
+        assert!(total_edges > 50);
+    }
+
+    #[test]
+    fn has_tables_false_for_empty_memory() {
+        let store = DuckStore::open().unwrap();
+        assert!(!store.has_tables());
     }
 }
