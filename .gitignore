@@ -1,32 +1,3 @@
-# Rust
 /target
-**/*.rs.bk
-# Note: Cargo.lock IS tracked — this workspace has a binary crate (fractalaw-cli)
-
-# WASM build artifacts
-*.cwasm
-*.component.wasm
-
-# IDE
-.idea/
-.vscode/
-.zed/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-
-# Environment
-.env
-.env.local
-
-# Data (local development)
-/data/*.csv
-/data/*.jsonl
-/data/*.parquet
-*.lance/
-*.duckdb
-*.duckdb.wal
+/models
+nohup.out

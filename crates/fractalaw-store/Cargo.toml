@@ -9,7 +9,7 @@ repository.workspace = true
 [features]
 default = []
 duckdb = ["dep:duckdb"]
-lancedb = ["dep:lancedb"]
+lancedb = ["dep:lancedb", "dep:parquet", "dep:futures"]
 datafusion = ["dep:datafusion"]
 full = ["duckdb", "lancedb", "datafusion"]
 
@@ -19,8 +19,13 @@ arrow = { workspace = true }
 async-trait = "0.1"
 datafusion = { workspace = true, optional = true }
 duckdb = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 lancedb = { workspace = true, optional = true }
+parquet = { workspace = true, optional = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

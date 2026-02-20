@@ -8,6 +8,11 @@ mod duck;
 #[cfg(feature = "duckdb")]
 pub use duck::DuckStore;
 
+#[cfg(feature = "lancedb")]
+mod lance;
+#[cfg(feature = "lancedb")]
+pub use lance::{LanceStore, read_parquet};
+
 #[cfg(all(feature = "duckdb", feature = "datafusion"))]
 mod fusion;
 #[cfg(all(feature = "duckdb", feature = "datafusion"))]

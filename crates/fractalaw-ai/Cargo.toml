@@ -8,12 +8,13 @@ repository.workspace = true
 
 [features]
 default = []
-onnx = ["dep:ort"]
+onnx = ["dep:ort", "dep:tokenizers"]
 
 [dependencies]
 fractalaw-core = { path = "../fractalaw-core" }
 arrow = { workspace = true }
 ort = { workspace = true, optional = true }
+tokenizers = { workspace = true, optional = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

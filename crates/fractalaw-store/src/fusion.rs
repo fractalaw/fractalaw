@@ -1,8 +1,9 @@
-//! DataFusion unified query layer over DuckDB tables.
+//! DataFusion unified query layer over DuckDB and LanceDB tables.
 //!
 //! `FusionStore` wraps a `DuckStore` and registers its tables as DataFusion
-//! `TableProvider`s, enabling standard SQL queries across both `legislation`
-//! and `law_edges` through a single `SessionContext`.
+//! `TableProvider`s, enabling standard SQL queries across `legislation`,
+//! `law_edges`, and (with the `lancedb` feature) `legislation_text` and
+//! `amendment_annotations` through a single `SessionContext`.
 
 use std::any::Any;
 use std::sync::{Arc, Mutex};
@@ -132,11 +133,15 @@ impl TableProvider for DuckTableProvider {
 
 // ── FusionStore ──
 
-/// Unified DataFusion query layer over DuckDB tables.
+/// Unified DataFusion query layer over DuckDB and LanceDB tables.
 ///
 /// Registers `legislation` and `law_edges` as DataFusion table providers,
 /// enabling standard SQL queries through a `SessionContext`. Includes
 /// `law_status()` and `edge_type_label()` scalar UDFs.
+///
+/// With the `lancedb` feature, also registers `legislation_text` and
+/// `amendment_annotations` from LanceDB, enabling cross-store SQL joins
+/// between the hot/analytical paths (DuckDB) and the semantic path (LanceDB).
 pub struct FusionStore {
     ctx: SessionContext,
 }
@@ -178,6 +183,68 @@ impl FusionStore {
     /// Access the underlying `SessionContext` for advanced use.
     pub fn context(&self) -> &SessionContext {
         &self.ctx
+    }
+}
+
+// ── LanceDB registration (feature-gated) ──
+
+#[cfg(feature = "lancedb")]
+impl FusionStore {
+    /// Register LanceDB tables (`legislation_text`, `amendment_annotations`)
+    /// into the DataFusion context as MemTable providers.
+    ///
+    /// Pre-loads all data from LanceDB into memory for zero-copy DataFusion
+    /// queries and cross-store joins with DuckDB tables.
+    pub async fn register_lance_tables(&self, store: &crate::LanceStore) -> Result<(), StoreError> {
+        self.register_lance_table_inner(store.legislation_text().await?, "legislation_text")
+            .await?;
+        self.register_lance_table_inner(
+            store.amendment_annotations().await?,
+            "amendment_annotations",
+        )
+        .await?;
+        info!("DataFusion context extended with legislation_text + amendment_annotations");
+        Ok(())
+    }
+
+    async fn register_lance_table_inner(
+        &self,
+        table: lancedb::Table,
+        name: &str,
+    ) -> Result<(), StoreError> {
+        use futures::TryStreamExt;
+        use lancedb::query::ExecutableQuery;
+
+        let batches: Vec<RecordBatch> = table
+            .query()
+            .execute()
+            .await
+            .map_err(|e| StoreError::Other(format!("lance query {name}: {e}")))?
+            .try_collect()
+            .await
+            .map_err(|e| StoreError::Other(format!("lance collect {name}: {e}")))?;
+
+        let schema = if let Some(first) = batches.first() {
+            first.schema()
+        } else {
+            table
+                .schema()
+                .await
+                .map_err(|e| StoreError::Other(format!("lance schema {name}: {e}")))?
+        };
+
+        let row_count: usize = batches.iter().map(|b| b.num_rows()).sum();
+        let mem = MemTable::try_new(schema, vec![batches])?;
+        self.ctx
+            .register_table(name, Arc::new(mem))
+            .map_err(|e| StoreError::Other(format!("register {name}: {e}")))?;
+
+        info!(
+            table = name,
+            rows = row_count,
+            "registered LanceDB table in DataFusion"
+        );
+        Ok(())
     }
 }
 
@@ -468,5 +535,112 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(col.value(0), "unknown_code");
+    }
+
+    // ── LanceDB integration tests ──
+
+    #[cfg(feature = "lancedb")]
+    mod lance_tests {
+        use super::*;
+        use crate::LanceStore;
+        use tempfile::TempDir;
+
+        async fn loaded_fusion_with_lance() -> (FusionStore, TempDir) {
+            let dir = require_data();
+            let duck = DuckStore::open().unwrap();
+            duck.load_all(&dir).unwrap();
+            let fusion = FusionStore::new(&duck).unwrap();
+
+            let tmp = TempDir::new().unwrap();
+            let lance = LanceStore::open(&tmp.path().join("lancedb")).await.unwrap();
+            lance.load_all(&dir).await.unwrap();
+            fusion.register_lance_tables(&lance).await.unwrap();
+
+            (fusion, tmp)
+        }
+
+        #[tokio::test]
+        async fn count_legislation_text() {
+            let (fusion, _tmp) = loaded_fusion_with_lance().await;
+            let batches = fusion
+                .query("SELECT count(*) AS cnt FROM legislation_text")
+                .await
+                .unwrap();
+            let cnt = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .unwrap()
+                .value(0);
+            assert!(
+                cnt > 90_000,
+                "expected >90K legislation_text rows, got {cnt}"
+            );
+        }
+
+        #[tokio::test]
+        async fn count_amendment_annotations() {
+            let (fusion, _tmp) = loaded_fusion_with_lance().await;
+            let batches = fusion
+                .query("SELECT count(*) AS cnt FROM amendment_annotations")
+                .await
+                .unwrap();
+            let cnt = batches[0]
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::Int64Array>()
+                .unwrap()
+                .value(0);
+            assert!(cnt > 15_000, "expected >15K annotation rows, got {cnt}");
+        }
+
+        #[tokio::test]
+        async fn query_legislation_text_by_law() {
+            let (fusion, _tmp) = loaded_fusion_with_lance().await;
+            let batches = fusion
+                .query(
+                    "SELECT section_id, text
+                     FROM legislation_text
+                     WHERE law_name = 'UK_ukpga_1974_37'
+                     LIMIT 5",
+                )
+                .await
+                .unwrap();
+            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(total_rows, 5);
+            assert_eq!(batches[0].num_columns(), 2);
+        }
+
+        #[tokio::test]
+        async fn cross_store_join_legislation_text() {
+            let (fusion, _tmp) = loaded_fusion_with_lance().await;
+            let batches = fusion
+                .query(
+                    "SELECT l.name, l.title, count(t.section_id) AS section_count
+                     FROM legislation l
+                     JOIN legislation_text t ON l.name = t.law_name
+                     WHERE l.name = 'UK_ukpga_1974_37'
+                     GROUP BY l.name, l.title",
+                )
+                .await
+                .unwrap();
+            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+            assert_eq!(total_rows, 1, "expected exactly one grouped row for HSWA");
+        }
+
+        #[tokio::test]
+        async fn four_tables_queryable() {
+            let (fusion, _tmp) = loaded_fusion_with_lance().await;
+            for (table, col) in [
+                ("legislation", "name"),
+                ("law_edges", "source_name"),
+                ("legislation_text", "section_id"),
+                ("amendment_annotations", "id"),
+            ] {
+                let sql = format!("SELECT {col} FROM {table} LIMIT 1");
+                let result = fusion.query(&sql).await;
+                assert!(result.is_ok(), "{table} not queryable: {:?}", result.err());
+            }
+        }
     }
 }
