@@ -1,8 +1,8 @@
 # Fractalaw Schema Design
 
-**Version**: 0.2 (draft)
-**Date**: 2026-02-16
-**Status**: Design — Tables 1–2 not yet exported; Tables 3–4 exported to Parquet
+**Version**: 0.3
+**Date**: 2026-02-19
+**Status**: All four tables exported to Parquet and validated
 
 This document defines the three-tier data model for Fractalaw. It is the spec from which `fractalaw-core/src/schema.rs` will be implemented.
 
@@ -535,19 +535,38 @@ Used in: `duties`, `rights`, `responsibilities`, `powers`
    - Output: `data/legislation.parquet` (19K+ rows)
    - **Status: done**
 
-2. **Derive `law_edges` from exported LRT**
+2. **Derive `law_edges` from exported LRT** — `data/export_edges.sql` (DuckDB)
    - Expand each `List<Struct>` relationship column into edge rows
    - Expand `*_stats_per_law` detail into article-level edge rows
-   - **Status: pending**
+   - Output: `data/law_edges.parquet` (1,035,305 edge rows)
+   - **Status: done**
 
 3. **Export LAT + annotations → Parquet** — `data/export_lat.sql` (DuckDB)
    - Source: 17 LAT-*.csv files (~115K rows, 460 laws) + 16 AMD-*.csv files (~12K rows, 104 laws)
    - Strips legacy acronyms from all ID columns
    - Separates content rows (→ `legislation_text`) from annotation rows (→ `amendment_annotations`)
    - Combines three annotation sources: C/I/E from LAT, F from LAT, F from AMD
-   - Output: `data/legislation_text.parquet` (99K rows, 453 laws), `data/amendment_annotations.parquet` (22K rows, 140 laws), `data/annotation_totals.parquet` (136 laws)
-   - FK match to LRT: 406/454 laws (89%); 48 unmatched are laws present in LAT but absent from LRT
-   - **Status: needs re-export** — schema revised to use three-column identity (`section_id` structural citation, `sort_key`, `position`), `heading` → `heading_group`, `section`/`article` → `provision`, annotation `source` column added, `UK_uksi_2016_1091` excluded
+   - Excludes `UK_uksi_2016_1091` (parser bug producing 606 duplicate annotation IDs)
+   - Output: `data/legislation_text.parquet` (97,522 rows, 452 laws), `data/amendment_annotations.parquet` (19,451 rows, 137 laws), `data/annotation_totals.parquet` (135 laws)
+   - FK match to LRT: 405/452 laws (90%); 47 unmatched are laws present in LAT but absent from LRT
+   - Zero duplicate `section_id` values, zero duplicate annotation `id` values
+   - **Status: done** — schema uses three-column identity (`section_id` structural citation, `sort_key`, `position`), `heading` → `heading_group`, `section`/`article` → `provision`, annotation `source` column, synthetic annotation IDs
+
+### Deviations from SCHEMA-2.0 Review
+
+The [SCHEMA-2.0 review](SCHEMA-2.0.md) recommended 9 changes. All high/medium priority items were implemented; some with design improvements over the original recommendation.
+
+| # | Recommendation | Outcome |
+|---|---------------|---------|
+| 1 | Replace `section_id` with `{law_name}:{position}` | **Improved**: used citation-based `{law_name}:{citation}[{extent}]` instead. Citations are parliament's canonical addressing scheme — stable across amendments, unlike position which requires renumbering when sections are inserted. Added `sort_key` for machine-sortable ordering. |
+| 2 | Rename `heading` → `heading_group` | **Done** |
+| 3 | Merge `section`/`article` → `provision` | **Done** |
+| 4 | Synthetic annotation ID | **Done**: `{law_name}:{code_type}:{seq}` — zero duplicates |
+| 5 | Add annotation `source` column | **Done**: `lat_cie`, `lat_f`, `amd_f` |
+| 6 | Filter 249 NULL rows | **Done** |
+| 7 | Use NULL for root `hierarchy_path` | **Deferred** |
+| 8 | Strip F-code markers from text | **Deferred** |
+| 9 | Non-UK structural support | **Deferred** |
 
 ### Phase 3+: Multi-jurisdiction
 

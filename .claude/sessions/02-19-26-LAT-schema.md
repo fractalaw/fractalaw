@@ -344,45 +344,102 @@ Document that:
 ## Tasks
 
 ### 1. Revise the LAT schema
-- [ ] Apply the three-column identity design: `section_id` (structural citation), `sort_key` (normalised sort), `position` (snapshot integer)
-- [ ] Rename `heading` → `heading_group`, merge `section`/`article` → `provision`
-- [ ] New annotation `id` = `{law_name}:{code_type}:{seq}`, add `source` column
-- [ ] Update `docs/SCHEMA.md` Tables 3 and 4
-- [ ] Update `crates/fractalaw-core/src/schema.rs` — `legislation_text_schema()` and `amendment_annotations_schema()`
-- [ ] Update unit tests in schema.rs
+- [x] Apply the three-column identity design: `section_id` (structural citation), `sort_key` (normalised sort), `position` (snapshot integer) — `schema.rs` updated, LAT now 28 cols
+- [x] Rename `heading` → `heading_group`, merge `section`/`article` → `provision` — 7 hierarchy cols (was 8)
+- [x] New annotation `id` = `{law_name}:{code_type}:{seq}`, add `source` column — annotations now 9 cols
+- [x] Update `docs/SCHEMA.md` Tables 3 and 4 — sections 3.1, 3.2, 3.7, 4.1, column counts, migration path
+- [x] Update `crates/fractalaw-core/src/schema.rs` — `legislation_text_schema()` and `amendment_annotations_schema()`
+- [x] Update unit tests in schema.rs — 21 tests, all passing
+- Commit: `471e161` — pushed to origin/master
 
 ### 2. Build sort key generation
-- [ ] Implement sort key normalisation rules for UK naming conventions
-- [ ] Handle: plain numeric, single letter suffix, Z-prefix, double letter, sub-section insertions
-- [ ] Validate against known ordering in the dataset (e.g., Environment Act s.40 → s.41 → s.41A → s.42)
+- [x] Implement sort key normalisation rules for UK naming conventions — `normalize_provision()` in `sort_key.rs`
+- [x] Handle: plain numeric, single letter suffix (A=010..Z=260), Z-prefix (ZA=001..ZZ=026), double letter, combined patterns
+- [x] Validate against known ordering: Environment Act s.40→41→41A→41B→41C→42, Z-prefix chains, double letters — 13 tests, all passing
+- [x] Also: `with_extent()` for parallel territorial provisions (extent qualifier appended with `~`)
+- Commit: `8d612c6` — pushed to origin/master
 
 ### 3. Rewrite the LAT export script
-- [ ] Rewrite `data/export_lat.sql` applying the revised schema
-- [ ] Generate `section_id` from citation path, `sort_key` from normalisation rules
-- [ ] New annotation `id` = `{law_name}:{code_type}:{seq}`
-- [ ] Add `source` column to annotations
-- [ ] Keep `legacy_id` for backward reference
-- [ ] Filter NULL rows (249 rows)
-- [ ] Exclude `UK_uksi_2016_1091` (broken parser data, 606 annotation duplicates)
-- [ ] Validate: zero duplicate `section_id`, zero duplicate annotation `id`
 
-### 4. Re-export LAT Parquet files
-- [ ] Run revised export script
-- [ ] Validate row counts match expectations (~99K content, ~22K annotations minus dupes/nulls)
-- [ ] Verify FK linkage: `law_name` in LAT matches `name` in LRT (legislation.parquet)
-- [ ] Verify `ORDER BY sort_key` recovers correct document order for laws with inserted sections
+Broken into incremental stages. Each stage can be tested independently before moving on.
 
-### 5. Smoke test with DuckDB
-- [ ] Load `legislation_text.parquet` into DuckDB alongside existing legislation + law_edges
-- [ ] Run cross-table queries: "show article text for HSWA 1974 section 25A"
-- [ ] Run annotation queries: "show all F-code amendments for COSHH"
-- [ ] Verify `section_id` uniqueness: `SELECT section_id, count(*) HAVING count(*) > 1` returns zero rows
-- [ ] Verify sort order: compare `ORDER BY sort_key` vs `ORDER BY position` for laws with insertions
+#### 3a. Stage 0–1: Macros and source loading
+- [x] Keep existing source loading (Stage 0) — exclusion filter applied downstream in export queries
+- [x] Keep existing macros: `strip_acronym`, `strip_id`, `map_section_type`, `map_code_type`, `extract_code`, `region_to_extent`, `count_codes`, `annotation_parent_id`, `is_content_row`
+- [x] Add `normalize_provision` as DuckDB macros (5 helpers + main, matching `sort_key.rs`): `prov_base`, `prov_suffix`, `suffix_val`, `suffix_len`, `normalize_provision`
+- [x] Add `provision_prefix(section_type, class)` macro — returns `s.`/`reg.`/`art.` or NULL
+- [x] Add `build_citation(section_type, class, provision, sub, para, part, chapter, heading_group, schedule, pos)` macro
+- [x] Add `build_sort_key(section_type, provision, heading_group, para, schedule)` macro
+- [x] Modify `build_hierarchy` to output `provision.` instead of `section.` in hierarchy_path labels
+- [x] Test: all macro smoke tests pass; full script runs end-to-end with modified `build_hierarchy`
 
-### 6. Update SCHEMA.md and close out
-- [ ] Document the three-column identity design and sort key rules
-- [ ] Document any deviations from SCHEMA-2.0 recommendations
-- [ ] Update migration path section in SCHEMA.md
+#### 3b. Stage 2: Pre-computations
+- [x] Keep existing `cie_counts` table
+- [x] Add `parallel_provisions` table — 937 provision pairs across 53 laws (more than the session doc's ~29 estimate because sub_section rows bring in additional extent variations)
+- [x] Add `content_id_map` table — 97,544 rows, all distinct section_ids (zero duplicates)
+- [x] Fix: partition position numbering by `strip_acronym("UK")` not raw `"UK"` (7 laws have multiple acronym variants across CSV files)
+- [x] Fix: `build_citation` schedule-prefix (`sch_prefix` helper) for headings/parts/chapters inside schedules
+- [x] Fix: `build_citation` position-qualify `title`/`signed`/`commencement` (can have multiples per law)
+- [x] Fix: position fallback when provision is empty for section/article types
+- [x] Disambiguation: 2,206 rows (2.3%) get `#pos` suffix where structural citation alone collides (heading_group/part/chapter resets across parts within a law)
+- [x] Test: HSWA citations look correct (`s.1`, `s.25A(1)`, `s.23(4)[E+W]`); zero duplicate section_ids
+
+#### 3c. Stage 3: Export legislation_text.parquet (28 cols)
+- [x] 28 columns matching `schema.rs` `legislation_text_schema()` order — verified exact match
+- [x] New identity columns: `section_id` (citation-based), `sort_key` (normalised), `legacy_id` (old positional ID)
+- [x] Renamed/merged: `heading` → `heading_group`, `section`/`article` → `provision`
+- [x] Filters: NULL text rows excluded (249), `UK_uksi_2016_1091` excluded (~1,342 rows) → 97,522 rows from 452 laws
+- [x] Extent qualifier `[extent]` on section_id for parallel territorial provisions (e.g., `s.23(4)[E+W]`)
+- [x] Extent suffix `~extent` on sort_key for parallel provisions (e.g., `023.000.000~E+W`)
+- [x] `#pos` disambiguation for 2,206 structural collisions (heading_group/part/chapter resets across law parts)
+- [x] ORDER BY law_name, sort_key, position — correct document order confirmed
+- [x] Zero `section_id` duplicates; sort_key ordering matches position for inserted sections (s.41→41A→41B→41C→42)
+
+#### 3d. Stage 4–5: Annotations export (9 cols) ✅
+- [x] Stage 4: Build `affected_sections` — remap old IDs → new citation-based `section_id` via `content_id_map` (INNER JOIN)
+- [x] Stage 5: Export `amendment_annotations.parquet` with 9 columns matching `schema.rs`
+- [x] Synthetic `id`: `{law_name}:{code_type}:{seq}` (per-law, per-code_type sequence number)
+- [x] New `source` column: `lat_cie` (7,522), `lat_f` (588), `amd_f` (11,341)
+- [x] New `affected_sections` with citation-based section_ids
+- [x] `UK_uksi_2016_1091` excluded
+- [x] Test: 19,451 rows from 137 laws, zero `id` duplicates
+
+#### 3e. Stage 6: Export annotation_totals.parquet ✅
+- [x] Exclude `UK_uksi_2016_1091` (added filter to all 3 CTEs)
+- [x] Test: 135 laws
+
+#### 3f. Stage 7: Verification queries ✅
+- [x] All existing verification checks retained
+- [x] Add: `section_id` uniqueness → 0 duplicates
+- [x] Add: annotation `id` uniqueness → 0 duplicates
+- [x] Add: annotation source breakdown
+- [x] Add: sample annotation IDs
+- [x] Add: sort key ordering vs position ordering for test laws (Environment Act 1995)
+- [x] Add: sample output showing new `section_id` and `sort_key` for HSWA 1974
+- [x] Add: sample showing parallel provisions with `[extent]` qualifiers
+
+### 4. Re-export LAT Parquet files ✅
+- [x] Run revised export script — clean end-to-end run
+- [x] Validate row counts: 97,522 content, 19,451 annotations, 135 annotation totals
+- [x] Verify FK linkage: 405/452 LAT laws matched LRT, 47 unmatched (LAT-only laws, known)
+- [x] Verify `ORDER BY sort_key, position` recovers correct document order for inserted sections (s.41→41A→41B→41C→42)
+- [x] UK_uksi_2016_1091 excluded from all 3 Parquet files (zero leaked rows)
+- [x] Annotation affected_sections FK: 18,025/18,225 matched (200 unmatched = NULL-text rows in content_id_map but excluded from legislation_text, acceptable edge case)
+- [x] Sort key reversals (9,237) are expected structural resets — headings/parts/schedules reset to 000.000.000 when crossing boundaries
+
+### 5. Smoke test with DuckDB ✅
+- [x] Load `legislation_text.parquet` into DuckDB alongside existing legislation + law_edges (all 4 tables loaded: 19,318 + 1,035,305 + 97,522 + 19,451 rows)
+- [x] Cross-table query: HSWA 1974 section 25A — returns 4 rows (section + 3 sub_sections), correct citation-based section_ids
+- [x] Annotation query: COSHH F-code amendments — 15 rows shown, correct `reg.` prefix for SI provisions (e.g. `UK_uksi_2002_2677:reg.2(1)`)
+- [x] Cross-table join: HSWA F1 annotation → affected section text via `affected_sections` unnest + JOIN — works correctly
+- [x] `section_id` uniqueness: zero duplicate rows returned
+- [x] Sort order: `ORDER BY sort_key` and `ORDER BY position` produce identical ordering for Environment Act 1995 sections 40–42 (including inserted 41A, 41B, 41C)
+
+### 6. Update SCHEMA.md and close out ✅
+- [x] Three-column identity design and sort key rules already documented in SCHEMA.md §3.1 (from Task 1 schema revision)
+- [x] Added deviations table from SCHEMA-2.0 recommendations (9 items: 6 done, 3 deferred)
+- [x] Updated migration path: all 3 steps marked done with current row counts
+- [x] Updated version 0.2 → 0.3, status → "All four tables exported to Parquet and validated"
 
 ## Reference: LAT Record Shape (Revised)
 
@@ -440,3 +497,15 @@ Three mechanisms link annotations to the sections they affect:
 | F-codes from AMD | `Articles` column directly lists section_ids | 100% |
 
 The `affected_sections` (List\<Utf8\>) column carries the result. ~93% of all annotations have resolved linkage.
+
+## Progress
+
+| Date | What | Commit |
+|------|------|--------|
+| 2026-02-19 | Design: three-column identity, parallel territorial provisions, cross-jurisdiction validation, heading column investigation, UK_uksi_2016_1091 exclusion | — (session doc) |
+| 2026-02-19 | Task 1: Revise LAT + annotation schemas in `schema.rs` and `SCHEMA.md` | `471e161` |
+| 2026-02-19 | Task 2: Sort key normalisation — `normalize_provision()` + `with_extent()`, 13 tests | `8d612c6` |
+
+## Next Step
+
+Task 3: Rewrite the LAT export script — apply the revised schema, generate `section_id` and `sort_key`, exclude broken data, validate uniqueness.
