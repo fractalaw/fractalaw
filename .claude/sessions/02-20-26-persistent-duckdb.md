@@ -174,7 +174,45 @@ Commands like `text` and `search` only use LanceDB. Currently they still open Du
 
 | Task | Status | Commit | Notes |
 |------|--------|--------|-------|
-| 1. `open_persistent()` | [ ] | | |
-| 2. `import` command | [ ] | | |
-| 3. CLI startup change | [ ] | | |
-| 4. Tests & validation | [ ] | | |
+| 1. `open_persistent()` | [x] | `021378c` | 4 new tests: create file, load+reopen, persistent queries, has_tables empty |
+| 2. `import` command | [x] | `021378c` | Explicit re-import with row count output |
+| 3. CLI startup change | [x] | `021378c` | `open_duck()` helper; LanceDB commands skip DuckDB entirely |
+| 4. Tests & validation | [x] | `021378c` | 77/77 workspace tests pass; manual timing verified |
+
+## Session Complete
+
+All 4 tasks done. Issue #9 shipped in commit `021378c`, pushed to `origin/master`.
+
+### Results
+
+| Command | Before | After | Speedup |
+|---------|--------|-------|---------|
+| `query "SELECT 1"` | 4.4s | 0.53s | 8x |
+| `law UK_ukpga_1974_37` | 4.6s | 0.9s | 5x |
+| `text` (LanceDB-only) | ~4.5s | 0.5s | 9x |
+| `import` (explicit) | n/a | 10.7s | — |
+
+### What Changed
+
+| File | Changes |
+|------|---------|
+| `crates/fractalaw-store/src/duck.rs` | Added `open_persistent(path)`, `has_tables()`; 4 new tests |
+| `crates/fractalaw-cli/src/main.rs` | Added `Import` command, `open_duck()` helper, `cmd_import()`; DuckDB commands use persistent store; LanceDB commands skip DuckDB |
+
+### Key Design Choice: Lazy DuckDB Loading
+
+The stretch goal (lazy DuckDB loading) was implemented as part of task 3. Instead of always opening DuckDB at startup, the `open_duck()` helper is only called from commands that need it. LanceDB-only commands (`text`, `search`, `embed`) never touch DuckDB — they go from ~4.5s to 0.5s even on first run.
+
+### CLI Commands (9 total)
+
+| Command | Store | Description |
+|---------|-------|-------------|
+| `stats` | DuckDB | Dataset summary |
+| `law <name>` | DuckDB | Single law card + edges |
+| `graph <name>` | DuckDB | Multi-hop traversal |
+| `query <sql>` | DataFusion | Cross-store SQL |
+| `import` | DuckDB | (Re)import Parquet into persistent DuckDB |
+| `embed` | ONNX + LanceDB | Batch embedding pipeline |
+| `text <name>` | LanceDB | Legislation sections by law |
+| `search "<query>"` | ONNX + LanceDB | Semantic similarity search |
+| `validate` | All stores | 4-check data integrity suite |
