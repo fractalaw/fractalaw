@@ -204,9 +204,16 @@ pub mod esh {
             ),
             Field::new("embedding_model", DataType::Utf8, true),
             Field::new("embedded_at", timestamp_ns_utc(), true),
-            // 3.6 Migration (1)
+            // 3.6 Pre-tokenized Text (2)
+            Field::new(
+                "token_ids",
+                DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+                true,
+            ),
+            Field::new("tokenizer_model", DataType::Utf8, true),
+            // 3.7 Migration (1)
             Field::new("legacy_id", DataType::Utf8, true),
-            // 3.7 Metadata (2)
+            // 3.8 Metadata (2)
             Field::new("created_at", timestamp_ns_utc(), false),
             Field::new("updated_at", timestamp_ns_utc(), false),
         ])
@@ -276,7 +283,7 @@ mod tests {
 
     #[test]
     fn legislation_text_schema_field_count() {
-        assert_eq!(esh::legislation_text_schema().fields().len(), 28);
+        assert_eq!(esh::legislation_text_schema().fields().len(), 30);
     }
 
     #[test]

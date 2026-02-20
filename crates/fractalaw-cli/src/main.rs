@@ -86,6 +86,15 @@ enum Command {
         model_dir: PathBuf,
     },
 
+    /// Tokenize text and display token IDs (for inspection/debugging)
+    Tokenize {
+        /// Text to tokenize
+        text: String,
+        /// Path to ONNX model directory
+        #[arg(long, default_value = "./models/all-MiniLM-L6-v2")]
+        model_dir: PathBuf,
+    },
+
     /// Import (or re-import) Parquet files into persistent DuckDB
     Import,
 }
@@ -120,6 +129,9 @@ async fn main() -> anyhow::Result<()> {
             limit,
             model_dir,
         } => cmd_search(&data_dir, &query, limit, &model_dir).await,
+
+        // Model-only commands — no data store needed.
+        Command::Tokenize { text, model_dir } => cmd_tokenize(&text, &model_dir),
     }
 }
 
@@ -302,7 +314,7 @@ async fn cmd_validate(
     println!("=== Validation ===\n");
 
     let mut passed = 0u32;
-    let total_checks = 4u32;
+    let total_checks = 5u32;
 
     // ── Check 1: Row counts ──
     let lance_count = lance.legislation_text_count().await?;
@@ -347,7 +359,33 @@ async fn cmd_validate(
         );
     }
 
-    // ── Check 3: Cross-store join ──
+    // ── Check 3: Token coverage ──
+    let table = lance.legislation_text().await?;
+    let tokenized_count = table
+        .count_rows(Some("tokenizer_model IS NOT NULL".to_string()))
+        .await?;
+
+    if tokenized_count == lance_count {
+        println!(
+            "  [PASS] Token coverage: {} / {} (100%)",
+            fmt_num(tokenized_count),
+            fmt_num(lance_count)
+        );
+        passed += 1;
+    } else {
+        let pct = if lance_count > 0 {
+            tokenized_count as f64 / lance_count as f64 * 100.0
+        } else {
+            0.0
+        };
+        println!(
+            "  [FAIL] Token coverage: {} / {} ({pct:.1}%)",
+            fmt_num(tokenized_count),
+            fmt_num(lance_count)
+        );
+    }
+
+    // ── Check 4: Cross-store join ──
     let fusion = FusionStore::new(store)?;
 
     // Register only legislation_text from Lance (amendment_annotations may not exist).
@@ -410,7 +448,7 @@ async fn cmd_validate(
         println!("  [FAIL] Cross-store join: {matched} / {text_laws} laws matched");
     }
 
-    // ── Check 4: Semantic smoke test ──
+    // ── Check 5: Semantic smoke test ──
     let mut embedder =
         fractalaw_ai::Embedder::load(&model_dir).context("loading embedding model")?;
     let query_text = "chemical exposure limits";
@@ -469,6 +507,29 @@ async fn cmd_validate(
 
     if passed < total_checks {
         anyhow::bail!("{} check(s) failed", total_checks - passed);
+    }
+
+    Ok(())
+}
+
+fn cmd_tokenize(text: &str, model_dir: &std::path::Path) -> anyhow::Result<()> {
+    let model_dir = model_dir
+        .canonicalize()
+        .with_context(|| format!("model directory '{}' not found", model_dir.display()))?;
+
+    let mut embedder =
+        fractalaw_ai::Embedder::load(&model_dir).context("loading embedding model")?;
+
+    let ids = embedder.tokenize(text)?;
+
+    println!("Model:  {}", embedder.model_name());
+    println!("Tokens: {}\n", ids.len());
+
+    println!("{:>6}  {:>6}  TOKEN", "INDEX", "ID");
+    println!("{:>6}  {:>6}  -----", "-----", "-----");
+    for (i, &id) in ids.iter().enumerate() {
+        let token = embedder.id_to_token(id).unwrap_or_else(|| "?".into());
+        println!("{i:>6}  {id:>6}  {token}");
     }
 
     Ok(())

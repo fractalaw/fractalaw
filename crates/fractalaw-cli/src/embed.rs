@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use anyhow::Context;
 use arrow::array::{
-    Array, FixedSizeListBuilder, Float32Builder, LargeStringArray, StringArray,
-    TimestampNanosecondArray,
+    Array, FixedSizeListBuilder, Float32Builder, LargeStringArray, ListBuilder, StringArray,
+    TimestampNanosecondArray, UInt32Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
@@ -63,17 +63,26 @@ pub async fn run_embed_pipeline(
         // Extract text column.
         let texts = extract_texts(batch);
 
-        // Generate embeddings in sub-batches of 256.
+        // Generate embeddings and token IDs in sub-batches of 256.
         let mut embeddings = Vec::with_capacity(n);
+        let mut all_token_ids = Vec::with_capacity(n);
         for chunk in texts.chunks(EMBED_BATCH_SIZE) {
             let batch_embs = embedder
                 .embed_batch(chunk)
                 .context("generating embeddings")?;
+            let batch_tokens = embedder.tokenize_batch(chunk).context("tokenizing")?;
             embeddings.extend(batch_embs);
+            all_token_ids.extend(batch_tokens);
         }
 
-        // Build output batch with embeddings populated.
-        let output = replace_embedding_columns(batch, &output_schema, &embeddings, now_nanos)?;
+        // Build output batch with embeddings and token IDs populated.
+        let output = replace_embedding_columns(
+            batch,
+            &output_schema,
+            &embeddings,
+            &all_token_ids,
+            now_nanos,
+        )?;
         output_batches.push(output);
 
         processed += n;
@@ -125,14 +134,30 @@ fn build_embedded_schema(source_schema: &Schema) -> Arc<Schema> {
         true,
     );
 
+    // Insert token columns after embedded_at (source Parquet doesn't have these).
+    let insert_at = ts_idx + 1;
+    fields.insert(
+        insert_at,
+        Field::new(
+            "token_ids",
+            DataType::List(Arc::new(Field::new("item", DataType::UInt32, false))),
+            true,
+        ),
+    );
+    fields.insert(
+        insert_at + 1,
+        Field::new("tokenizer_model", DataType::Utf8, true),
+    );
+
     Arc::new(Schema::new(fields))
 }
 
-/// Replace the 3 embedding columns in a RecordBatch with actual values.
+/// Replace embedding columns and insert token columns into a RecordBatch.
 fn replace_embedding_columns(
     batch: &RecordBatch,
     schema: &Arc<Schema>,
     embeddings: &[Vec<f32>],
+    token_ids: &[Vec<u32>],
     now_nanos: i64,
 ) -> anyhow::Result<RecordBatch> {
     let n = batch.num_rows();
@@ -162,6 +187,31 @@ fn replace_embedding_columns(
     // embedded_at: Timestamp(Nanosecond, UTC)
     columns[ts_idx] =
         Arc::new(TimestampNanosecondArray::from(vec![now_nanos; n]).with_timezone("UTC"));
+
+    // Insert token_ids and tokenizer_model after embedded_at
+    // (these columns don't exist in the source Parquet).
+    let insert_at = ts_idx + 1;
+
+    // token_ids: List<non-null UInt32>
+    let mut list_builder = ListBuilder::new(UInt32Builder::new()).with_field(Field::new(
+        "item",
+        DataType::UInt32,
+        false,
+    ));
+    for ids in token_ids {
+        let values = list_builder.values();
+        for &id in ids {
+            values.append_value(id);
+        }
+        list_builder.append(true);
+    }
+    columns.insert(insert_at, Arc::new(list_builder.finish()));
+
+    // tokenizer_model: Utf8
+    columns.insert(
+        insert_at + 1,
+        Arc::new(StringArray::from(vec![MODEL_NAME; n])),
+    );
 
     Ok(RecordBatch::try_new(schema.clone(), columns)?)
 }

@@ -18,6 +18,7 @@ pub struct Embedder {
     session: Session,
     tokenizer: Tokenizer,
     dim: usize,
+    model_name: String,
 }
 
 impl Embedder {
@@ -53,17 +54,56 @@ impl Embedder {
             ..Default::default()
         }));
 
+        // Derive model name from the directory name (e.g., "all-MiniLM-L6-v2").
+        let model_name = model_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
         info!(dim, model = %model_path.display(), "loaded embedding model");
         Ok(Self {
             session,
             tokenizer,
             dim,
+            model_name,
         })
     }
 
     /// Embedding dimensionality (384 for all-MiniLM-L6-v2).
     pub fn dim(&self) -> usize {
         self.dim
+    }
+
+    /// Model name derived from the model directory (e.g., `all-MiniLM-L6-v2`).
+    pub fn model_name(&self) -> &str {
+        &self.model_name
+    }
+
+    /// Tokenize a single text, returning token IDs (including `[CLS]` and `[SEP]`).
+    pub fn tokenize(&mut self, text: &str) -> anyhow::Result<Vec<u32>> {
+        let encoding = self
+            .tokenizer
+            .encode(text, true)
+            .map_err(|e| anyhow::anyhow!("tokenize: {e}"))?;
+        Ok(encoding.get_ids().to_vec())
+    }
+
+    /// Map a token ID to its string representation (e.g., 101 → `[CLS]`).
+    pub fn id_to_token(&self, id: u32) -> Option<String> {
+        self.tokenizer.id_to_token(id)
+    }
+
+    /// Tokenize a batch of texts, returning one token ID list per input.
+    pub fn tokenize_batch(&mut self, texts: &[&str]) -> anyhow::Result<Vec<Vec<u32>>> {
+        if texts.is_empty() {
+            return Ok(vec![]);
+        }
+        let encodings = self
+            .tokenizer
+            .encode_batch(texts.to_vec(), true)
+            .map_err(|e| anyhow::anyhow!("tokenize: {e}"))?;
+        Ok(encodings.iter().map(|e| e.get_ids().to_vec()).collect())
     }
 
     /// Embed a single text string, returning a normalized vector.
@@ -283,5 +323,76 @@ mod tests {
 
     fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
         a.iter().zip(b).map(|(x, y)| x * y).sum()
+    }
+
+    // ── Tokenization tests ──
+
+    #[test]
+    fn tokenize_single() {
+        let dir = require_model();
+        let mut embedder = Embedder::load(&dir).unwrap();
+        let ids = embedder.tokenize("Health and safety at work").unwrap();
+
+        assert!(ids.len() >= 3, "expected at least [CLS] + words + [SEP]");
+        assert_eq!(ids[0], 101, "first token should be [CLS]");
+        assert_eq!(*ids.last().unwrap(), 102, "last token should be [SEP]");
+    }
+
+    #[test]
+    fn tokenize_batch_count() {
+        let dir = require_model();
+        let mut embedder = Embedder::load(&dir).unwrap();
+        let texts = &["fire safety", "chemical exposure", "waste disposal"];
+        let token_lists = embedder.tokenize_batch(texts).unwrap();
+        assert_eq!(token_lists.len(), 3);
+        for (i, ids) in token_lists.iter().enumerate() {
+            assert_eq!(ids[0], 101, "text {i}: first token should be [CLS]");
+            assert_eq!(
+                *ids.last().unwrap(),
+                102,
+                "text {i}: last token should be [SEP]"
+            );
+        }
+    }
+
+    #[test]
+    fn tokenize_truncates_long_text() {
+        let dir = require_model();
+        let mut embedder = Embedder::load(&dir).unwrap();
+        // Generate text that exceeds 256 tokens.
+        let long_text = "regulation ".repeat(500);
+        let ids = embedder.tokenize(&long_text).unwrap();
+        assert!(
+            ids.len() <= 256,
+            "should truncate to ≤256, got {}",
+            ids.len()
+        );
+        assert_eq!(*ids.last().unwrap(), 102, "last token should be [SEP]");
+    }
+
+    #[test]
+    fn tokenize_empty_text() {
+        let dir = require_model();
+        let mut embedder = Embedder::load(&dir).unwrap();
+        let ids = embedder.tokenize("").unwrap();
+        // Empty text → [CLS] + [SEP] only.
+        assert_eq!(ids.len(), 2);
+        assert_eq!(ids[0], 101);
+        assert_eq!(ids[1], 102);
+    }
+
+    #[test]
+    fn tokenize_empty_batch() {
+        let dir = require_model();
+        let mut embedder = Embedder::load(&dir).unwrap();
+        let result = embedder.tokenize_batch(&[]).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn model_name_from_dir() {
+        let dir = require_model();
+        let embedder = Embedder::load(&dir).unwrap();
+        assert_eq!(embedder.model_name(), "all-MiniLM-L6-v2");
     }
 }
