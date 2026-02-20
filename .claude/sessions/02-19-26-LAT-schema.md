@@ -505,7 +505,18 @@ The `affected_sections` (List\<Utf8\>) column carries the result. ~93% of all an
 | 2026-02-19 | Design: three-column identity, parallel territorial provisions, cross-jurisdiction validation, heading column investigation, UK_uksi_2016_1091 exclusion | — (session doc) |
 | 2026-02-19 | Task 1: Revise LAT + annotation schemas in `schema.rs` and `SCHEMA.md` | `471e161` |
 | 2026-02-19 | Task 2: Sort key normalisation — `normalize_provision()` + `with_extent()`, 13 tests | `8d612c6` |
+| 2026-02-19 | Tasks 3–6: Rewrite LAT export, validate, smoke test, update SCHEMA.md v0.3 | `daebf33` |
 
-## Next Step
+## Session Closed
 
-Task 3: Rewrite the LAT export script — apply the revised schema, generate `section_id` and `sort_key`, exclude broken data, validate uniqueness.
+**Date**: 2026-02-19
+**Status**: All 6 tasks complete. LAT baseline is clean and usable for development.
+
+**Final outputs**:
+- `data/legislation_text.parquet` — 97,522 rows, 452 laws, 28 cols, zero duplicate `section_id`
+- `data/amendment_annotations.parquet` — 19,451 rows, 137 laws, 9 cols, zero duplicate `id`
+- `data/annotation_totals.parquet` — 135 laws
+- `docs/SCHEMA.md` v0.3 — all four tables exported and validated
+- `crates/fractalaw-core/src/schema.rs` — schemas match exports, 21 tests passing
+
+**Unblocks**: Issue #11 (Phase 2: ONNX embeddings, semantic search, LanceDB integration) — LAT cleanup was the blocker, now resolved.
