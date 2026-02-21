@@ -255,6 +255,43 @@ pub mod esh {
         ])
     }
 
+    /// Schema for the `drrp_annotations` table — sync path.
+    ///
+    /// One row per rough DRRP annotation pulled from the sertantai outbox.
+    /// These are regex-flagged provisions awaiting AI polishing.
+    pub fn drrp_annotations_schema() -> Schema {
+        Schema::new(vec![
+            Field::new("law_name", DataType::Utf8, false),
+            Field::new("provision", DataType::Utf8, false),
+            Field::new("drrp_type", DataType::Utf8, false),
+            Field::new("source_text", DataType::Utf8, false),
+            Field::new("confidence", DataType::Float32, false),
+            Field::new("scraped_at", timestamp_ns_utc(), false),
+            Field::new("polished", DataType::Boolean, false),
+            Field::new("synced_at", timestamp_ns_utc(), false),
+        ])
+    }
+
+    /// Schema for the `polished_drrp` table — output path.
+    ///
+    /// One row per AI-refined DRRP provision. Produced by the drrp-polisher
+    /// micro-app from raw annotations + legislation text.
+    pub fn polished_drrp_schema() -> Schema {
+        Schema::new(vec![
+            Field::new("law_name", DataType::Utf8, false),
+            Field::new("provision", DataType::Utf8, false),
+            Field::new("drrp_type", DataType::Utf8, false),
+            Field::new("holder", DataType::Utf8, false),
+            Field::new("text", DataType::Utf8, false),
+            Field::new("qualifier", DataType::Utf8, true),
+            Field::new("clause_ref", DataType::Utf8, false),
+            Field::new("confidence", DataType::Float32, false),
+            Field::new("polished_at", timestamp_ns_utc(), false),
+            Field::new("model", DataType::Utf8, false),
+            Field::new("pushed", DataType::Boolean, false),
+        ])
+    }
+
     /// Schema for the immutable audit log (fractal:audit WIT interface).
     pub fn audit_log_schema() -> Schema {
         Schema::new(vec![
@@ -297,6 +334,16 @@ mod tests {
     #[test]
     fn amendment_annotations_schema_field_count() {
         assert_eq!(esh::amendment_annotations_schema().fields().len(), 9);
+    }
+
+    #[test]
+    fn drrp_annotations_schema_field_count() {
+        assert_eq!(esh::drrp_annotations_schema().fields().len(), 8);
+    }
+
+    #[test]
+    fn polished_drrp_schema_field_count() {
+        assert_eq!(esh::polished_drrp_schema().fields().len(), 11);
     }
 
     #[test]
@@ -379,6 +426,67 @@ mod tests {
     fn annotation_source_not_nullable() {
         let schema = esh::amendment_annotations_schema();
         assert!(!schema.field_with_name("source").unwrap().is_nullable());
+    }
+
+    // ── DRRP annotations ──
+
+    #[test]
+    fn drrp_annotations_identity_not_nullable() {
+        let schema = esh::drrp_annotations_schema();
+        assert!(!schema.field_with_name("law_name").unwrap().is_nullable());
+        assert!(!schema.field_with_name("provision").unwrap().is_nullable());
+        assert!(!schema.field_with_name("drrp_type").unwrap().is_nullable());
+        assert!(!schema.field_with_name("source_text").unwrap().is_nullable());
+    }
+
+    #[test]
+    fn drrp_annotations_has_polished_flag() {
+        let schema = esh::drrp_annotations_schema();
+        let field = schema.field_with_name("polished").unwrap();
+        assert_eq!(*field.data_type(), DataType::Boolean);
+        assert!(!field.is_nullable());
+    }
+
+    // ── Polished DRRP ──
+
+    #[test]
+    fn polished_drrp_qualifier_nullable() {
+        let schema = esh::polished_drrp_schema();
+        assert!(schema.field_with_name("qualifier").unwrap().is_nullable());
+    }
+
+    #[test]
+    fn polished_drrp_required_fields_not_nullable() {
+        let schema = esh::polished_drrp_schema();
+        for col in [
+            "law_name",
+            "provision",
+            "drrp_type",
+            "holder",
+            "text",
+            "clause_ref",
+            "model",
+        ] {
+            assert!(
+                !schema.field_with_name(col).unwrap().is_nullable(),
+                "{col} should not be nullable"
+            );
+        }
+    }
+
+    #[test]
+    fn polished_drrp_has_pushed_flag() {
+        let schema = esh::polished_drrp_schema();
+        let field = schema.field_with_name("pushed").unwrap();
+        assert_eq!(*field.data_type(), DataType::Boolean);
+        assert!(!field.is_nullable());
+    }
+
+    #[test]
+    fn polished_drrp_confidence_is_f32() {
+        let schema = esh::polished_drrp_schema();
+        let field = schema.field_with_name("confidence").unwrap();
+        assert_eq!(*field.data_type(), DataType::Float32);
     }
 
     // ── List<Struct> type assertions ──

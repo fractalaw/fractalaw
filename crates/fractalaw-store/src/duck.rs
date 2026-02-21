@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use arrow::array::Array;
 use arrow::record_batch::RecordBatch;
 use duckdb::Connection;
 use tracing::info;
@@ -180,6 +181,199 @@ impl DuckStore {
         Ok(batches)
     }
 
+    // ── Insert ──
+
+    /// Insert an Arrow RecordBatch into the named table.
+    ///
+    /// Writes the batch to a temp Parquet file and uses DuckDB's native
+    /// `read_parquet()` for bulk insert. The batch schema must match the
+    /// target table's columns.
+    pub fn insert_batch(&self, table: &str, batch: &RecordBatch) -> Result<(), StoreError> {
+        // Validate table name to prevent SQL injection (alphanumeric + underscore only).
+        if !table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(StoreError::Other(format!("invalid table name: {table}")));
+        }
+
+        // Write batch to a temp Parquet file, then INSERT via read_parquet().
+        let tmp = tempfile::Builder::new().suffix(".parquet").tempfile()?;
+        {
+            let mut writer = parquet::arrow::ArrowWriter::try_new(
+                tmp.as_file().try_clone()?,
+                batch.schema(),
+                None,
+            )
+            .map_err(|e| StoreError::Other(format!("parquet writer: {e}")))?;
+            writer
+                .write(batch)
+                .map_err(|e| StoreError::Other(format!("parquet write: {e}")))?;
+            writer
+                .close()
+                .map_err(|e| StoreError::Other(format!("parquet close: {e}")))?;
+        }
+        let sql = format!(
+            "INSERT INTO {table} SELECT * FROM read_parquet('{}')",
+            tmp.path().display()
+        );
+        self.conn.execute_batch(&sql)?;
+        Ok(())
+    }
+
+    // ── DRRP tables ──
+
+    /// Create the `drrp_annotations` and `polished_drrp` tables if they don't exist.
+    ///
+    /// Unlike legislation/law_edges (loaded from Parquet), these are empty tables
+    /// populated by `fractalaw sync pull` and the drrp-polisher micro-app.
+    pub fn create_drrp_tables(&self) -> Result<(), StoreError> {
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS drrp_annotations (
+                law_name       VARCHAR NOT NULL,
+                provision      VARCHAR NOT NULL,
+                drrp_type      VARCHAR NOT NULL,
+                source_text    VARCHAR NOT NULL,
+                confidence     FLOAT   NOT NULL,
+                scraped_at     TIMESTAMPTZ NOT NULL,
+                polished       BOOLEAN NOT NULL DEFAULT false,
+                synced_at      TIMESTAMPTZ NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS polished_drrp (
+                law_name       VARCHAR NOT NULL,
+                provision      VARCHAR NOT NULL,
+                drrp_type      VARCHAR NOT NULL,
+                holder         VARCHAR NOT NULL,
+                text           VARCHAR NOT NULL,
+                qualifier      VARCHAR,
+                clause_ref     VARCHAR NOT NULL,
+                confidence     FLOAT   NOT NULL,
+                polished_at    TIMESTAMPTZ NOT NULL,
+                model          VARCHAR NOT NULL,
+                pushed         BOOLEAN NOT NULL DEFAULT false
+            );",
+        )?;
+        info!("ensured drrp_annotations and polished_drrp tables exist");
+        Ok(())
+    }
+
+    /// Number of rows in the `drrp_annotations` table.
+    pub fn drrp_annotations_count(&self) -> Result<usize, StoreError> {
+        self.count_table("drrp_annotations")
+    }
+
+    /// Number of rows in the `polished_drrp` table.
+    pub fn polished_drrp_count(&self) -> Result<usize, StoreError> {
+        self.count_table("polished_drrp")
+    }
+
+    // ── Sync helpers ──
+
+    /// Insert a batch of annotations pulled from sertantai.
+    ///
+    /// Each annotation is inserted with `polished = false` and `synced_at = CURRENT_TIMESTAMP`.
+    /// Returns the number of rows inserted.
+    pub fn insert_annotations(
+        &self,
+        annotations: &[fractalaw_core::Annotation],
+    ) -> Result<usize, StoreError> {
+        if annotations.is_empty() {
+            return Ok(0);
+        }
+        for ann in annotations {
+            let sql = format!(
+                "INSERT INTO drrp_annotations VALUES ('{}', '{}', '{}', '{}', {}, '{}', false, CURRENT_TIMESTAMP)",
+                sql_escape(&ann.law_name),
+                sql_escape(&ann.provision),
+                sql_escape(&ann.drrp_type),
+                sql_escape(&ann.source_text),
+                ann.confidence,
+                sql_escape(&ann.scraped_at),
+            );
+            self.conn.execute_batch(&sql)?;
+        }
+        Ok(annotations.len())
+    }
+
+    /// Get all polished DRRP entries that haven't been pushed to sertantai yet.
+    pub fn get_unpushed_polished(&self) -> Result<Vec<fractalaw_core::PolishedEntry>, StoreError> {
+        let batches = self.query_arrow(
+            "SELECT law_name, provision, drrp_type, holder, text, qualifier, \
+             clause_ref, confidence, polished_at::VARCHAR AS polished_at, model \
+             FROM polished_drrp WHERE pushed = false",
+        )?;
+        let mut entries = Vec::new();
+        for batch in &batches {
+            let law_name = string_col(batch, "law_name");
+            let provision = string_col(batch, "provision");
+            let drrp_type = string_col(batch, "drrp_type");
+            let holder = string_col(batch, "holder");
+            let text = string_col(batch, "text");
+            let qualifier = string_col_nullable(batch, "qualifier");
+            let clause_ref = string_col(batch, "clause_ref");
+            let confidence = float_col(batch, "confidence");
+            let polished_at = string_col(batch, "polished_at");
+            let model = string_col(batch, "model");
+
+            for i in 0..batch.num_rows() {
+                entries.push(fractalaw_core::PolishedEntry {
+                    law_name: law_name[i].clone(),
+                    provision: provision[i].clone(),
+                    drrp_type: drrp_type[i].clone(),
+                    holder: holder[i].clone(),
+                    text: text[i].clone(),
+                    qualifier: qualifier[i].clone(),
+                    clause_ref: clause_ref[i].clone(),
+                    confidence: confidence[i],
+                    polished_at: polished_at[i].clone(),
+                    model: model[i].clone(),
+                });
+            }
+        }
+        Ok(entries)
+    }
+
+    /// Mark polished entries as pushed (by law_name + provision).
+    pub fn mark_pushed(&self, law_name: &str, provision: &str) -> Result<(), StoreError> {
+        let sql = format!(
+            "UPDATE polished_drrp SET pushed = true \
+             WHERE law_name = '{}' AND provision = '{}'",
+            sql_escape(law_name),
+            sql_escape(provision),
+        );
+        self.conn.execute_batch(&sql)?;
+        Ok(())
+    }
+
+    /// Get the most recent `synced_at` timestamp from `drrp_annotations`.
+    ///
+    /// Returns `None` if the table is empty (no prior sync).
+    pub fn get_last_sync_at(&self) -> Result<Option<String>, StoreError> {
+        let batches =
+            self.query_arrow("SELECT MAX(synced_at)::VARCHAR AS last_sync FROM drrp_annotations")?;
+        if let Some(batch) = batches.first()
+            && batch.num_rows() > 0
+        {
+            let col = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::StringArray>();
+            if let Some(arr) = col
+                && !arr.is_null(0)
+            {
+                return Ok(Some(arr.value(0).to_string()));
+            }
+            // DuckDB may return LargeStringArray for VARCHAR casts.
+            let col = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::LargeStringArray>();
+            if let Some(arr) = col
+                && !arr.is_null(0)
+            {
+                return Ok(Some(arr.value(0).to_string()));
+            }
+        }
+        Ok(None)
+    }
+
     // ── Escape hatch ──
 
     /// Execute a DDL/DML statement that returns no result set.
@@ -201,6 +395,67 @@ impl DuckStore {
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
+}
+
+/// Escape single quotes in a string for safe SQL interpolation.
+fn sql_escape(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// Extract a non-nullable VARCHAR column as a Vec of Strings.
+fn string_col(batch: &RecordBatch, name: &str) -> Vec<String> {
+    let col = batch.column_by_name(name).expect(name);
+    if let Some(arr) = col.as_any().downcast_ref::<arrow::array::StringArray>() {
+        (0..arr.len()).map(|i| arr.value(i).to_string()).collect()
+    } else if let Some(arr) = col
+        .as_any()
+        .downcast_ref::<arrow::array::LargeStringArray>()
+    {
+        (0..arr.len()).map(|i| arr.value(i).to_string()).collect()
+    } else {
+        panic!("column {name} is not a string type");
+    }
+}
+
+/// Extract a nullable VARCHAR column as a Vec of Option<String>.
+fn string_col_nullable(batch: &RecordBatch, name: &str) -> Vec<Option<String>> {
+    let col = batch.column_by_name(name).expect(name);
+    if let Some(arr) = col.as_any().downcast_ref::<arrow::array::StringArray>() {
+        (0..arr.len())
+            .map(|i| {
+                if arr.is_null(i) {
+                    None
+                } else {
+                    Some(arr.value(i).to_string())
+                }
+            })
+            .collect()
+    } else if let Some(arr) = col
+        .as_any()
+        .downcast_ref::<arrow::array::LargeStringArray>()
+    {
+        (0..arr.len())
+            .map(|i| {
+                if arr.is_null(i) {
+                    None
+                } else {
+                    Some(arr.value(i).to_string())
+                }
+            })
+            .collect()
+    } else {
+        panic!("column {name} is not a string type");
+    }
+}
+
+/// Extract a FLOAT column as a Vec of f32.
+fn float_col(batch: &RecordBatch, name: &str) -> Vec<f32> {
+    let col = batch.column_by_name(name).expect(name);
+    let arr = col
+        .as_any()
+        .downcast_ref::<arrow::array::Float32Array>()
+        .unwrap_or_else(|| panic!("column {name} is not Float32"));
+    (0..arr.len()).map(|i| arr.value(i)).collect()
 }
 
 #[cfg(test)]
@@ -416,5 +671,263 @@ mod tests {
     fn has_tables_false_for_empty_memory() {
         let store = DuckStore::open().unwrap();
         assert!(!store.has_tables());
+    }
+
+    // ── DRRP tables ──
+
+    #[test]
+    fn create_drrp_tables_empty() {
+        let store = DuckStore::open().unwrap();
+        store.create_drrp_tables().unwrap();
+        assert_eq!(store.drrp_annotations_count().unwrap(), 0);
+        assert_eq!(store.polished_drrp_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn create_drrp_tables_idempotent() {
+        let store = DuckStore::open().unwrap();
+        store.create_drrp_tables().unwrap();
+        store.create_drrp_tables().unwrap(); // second call should not error
+        assert_eq!(store.drrp_annotations_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn drrp_annotations_insert_and_count() {
+        let store = DuckStore::open().unwrap();
+        store.create_drrp_tables().unwrap();
+        store
+            .execute(
+                "INSERT INTO drrp_annotations VALUES (
+                    'UK_ukpga_1974_37', 's.2(1)', 'duty',
+                    'It shall be the duty of every employer...',
+                    0.85, '2026-02-21T10:00:00Z', false, '2026-02-21T12:00:00Z'
+                )",
+            )
+            .unwrap();
+        assert_eq!(store.drrp_annotations_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn polished_drrp_insert_and_count() {
+        let store = DuckStore::open().unwrap();
+        store.create_drrp_tables().unwrap();
+        store
+            .execute(
+                "INSERT INTO polished_drrp VALUES (
+                    'UK_ukpga_1974_37', 's.2(1)', 'duty', 'every employer',
+                    'ensure health safety and welfare of employees',
+                    'so far as is reasonably practicable', 's.2(1)',
+                    0.95, '2026-02-21T13:00:00Z', 'claude-sonnet-4-5-20250929', false
+                )",
+            )
+            .unwrap();
+        assert_eq!(store.polished_drrp_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn polished_drrp_qualifier_nullable() {
+        let store = DuckStore::open().unwrap();
+        store.create_drrp_tables().unwrap();
+        store
+            .execute(
+                "INSERT INTO polished_drrp VALUES (
+                    'UK_ukpga_1974_37', 's.3', 'duty', 'every employer',
+                    'conduct undertaking without risk to persons',
+                    NULL, 's.3',
+                    0.90, '2026-02-21T13:00:00Z', 'claude-sonnet-4-5-20250929', false
+                )",
+            )
+            .unwrap();
+        assert_eq!(store.polished_drrp_count().unwrap(), 1);
+    }
+
+    // ── insert_batch ──
+
+    #[test]
+    fn insert_batch_roundtrip() {
+        use arrow::array::{Float32Array, StringArray};
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let store = DuckStore::open().unwrap();
+        store
+            .execute("CREATE TABLE test_insert (name VARCHAR, score FLOAT)")
+            .unwrap();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("score", DataType::Float32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["alice", "bob"])),
+                Arc::new(Float32Array::from(vec![0.9, 0.7])),
+            ],
+        )
+        .unwrap();
+
+        store.insert_batch("test_insert", &batch).unwrap();
+
+        let result = store
+            .query_arrow("SELECT name, score FROM test_insert ORDER BY name")
+            .unwrap();
+        let total_rows: usize = result.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 2);
+    }
+
+    #[test]
+    fn insert_batch_rejects_bad_table_name() {
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::sync::Arc;
+
+        let store = DuckStore::open().unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Utf8, true)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(StringArray::from(vec!["test"]))]).unwrap();
+
+        let result = store.insert_batch("bad;table", &batch);
+        assert!(result.is_err());
+    }
+
+    // ── Sync helpers ──
+
+    #[test]
+    fn insert_annotations_roundtrip() {
+        let store = DuckStore::open().unwrap();
+        store.create_drrp_tables().unwrap();
+
+        let annotations = vec![
+            fractalaw_core::Annotation {
+                law_name: "UK_ukpga_1974_37".into(),
+                provision: "s.2(1)".into(),
+                drrp_type: "duty".into(),
+                source_text: "It shall be the duty of every employer...".into(),
+                confidence: 0.85,
+                scraped_at: "2026-02-21T10:00:00Z".into(),
+            },
+            fractalaw_core::Annotation {
+                law_name: "UK_ukpga_1974_37".into(),
+                provision: "s.7(a)".into(),
+                drrp_type: "duty".into(),
+                source_text: "It shall be the duty of every employee...".into(),
+                confidence: 0.80,
+                scraped_at: "2026-02-21T10:00:00Z".into(),
+            },
+        ];
+
+        let count = store.insert_annotations(&annotations).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(store.drrp_annotations_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn insert_annotations_empty() {
+        let store = DuckStore::open().unwrap();
+        store.create_drrp_tables().unwrap();
+
+        let count = store.insert_annotations(&[]).unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(store.drrp_annotations_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn insert_annotations_escapes_quotes() {
+        let store = DuckStore::open().unwrap();
+        store.create_drrp_tables().unwrap();
+
+        let annotations = vec![fractalaw_core::Annotation {
+            law_name: "UK_ukpga_1974_37".into(),
+            provision: "s.2(1)".into(),
+            drrp_type: "duty".into(),
+            source_text: "employer's duty to ensure employees' safety".into(),
+            confidence: 0.85,
+            scraped_at: "2026-02-21T10:00:00Z".into(),
+        }];
+
+        store.insert_annotations(&annotations).unwrap();
+        assert_eq!(store.drrp_annotations_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn get_unpushed_polished_returns_entries() {
+        let store = DuckStore::open().unwrap();
+        store.create_drrp_tables().unwrap();
+
+        // Insert two unpushed and one pushed entry.
+        store
+            .execute(
+                "INSERT INTO polished_drrp VALUES
+                    ('UK_ukpga_1974_37', 's.2(1)', 'duty', 'every employer',
+                     'ensure health safety', 'so far as is reasonably practicable', 's.2(1)',
+                     0.95, '2026-02-21T13:00:00Z', 'claude-sonnet-4-5-20250929', false),
+                    ('UK_ukpga_1974_37', 's.7(a)', 'duty', 'every employee',
+                     'take reasonable care', NULL, 's.7(a)',
+                     0.90, '2026-02-21T13:00:00Z', 'claude-sonnet-4-5-20250929', false),
+                    ('UK_ukpga_1974_37', 's.3', 'duty', 'every employer',
+                     'conduct undertaking', NULL, 's.3',
+                     0.88, '2026-02-21T13:00:00Z', 'claude-sonnet-4-5-20250929', true)",
+            )
+            .unwrap();
+
+        let entries = store.get_unpushed_polished().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].provision, "s.2(1)");
+        assert_eq!(
+            entries[0].qualifier.as_deref(),
+            Some("so far as is reasonably practicable")
+        );
+        assert!(entries[1].qualifier.is_none());
+    }
+
+    #[test]
+    fn mark_pushed_updates_flag() {
+        let store = DuckStore::open().unwrap();
+        store.create_drrp_tables().unwrap();
+
+        store
+            .execute(
+                "INSERT INTO polished_drrp VALUES
+                    ('UK_ukpga_1974_37', 's.2(1)', 'duty', 'every employer',
+                     'ensure health safety', NULL, 's.2(1)',
+                     0.95, '2026-02-21T13:00:00Z', 'claude-sonnet-4-5-20250929', false)",
+            )
+            .unwrap();
+
+        assert_eq!(store.get_unpushed_polished().unwrap().len(), 1);
+        store.mark_pushed("UK_ukpga_1974_37", "s.2(1)").unwrap();
+        assert_eq!(store.get_unpushed_polished().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn get_last_sync_at_empty() {
+        let store = DuckStore::open().unwrap();
+        store.create_drrp_tables().unwrap();
+        assert!(store.get_last_sync_at().unwrap().is_none());
+    }
+
+    #[test]
+    fn get_last_sync_at_returns_max() {
+        let store = DuckStore::open().unwrap();
+        store.create_drrp_tables().unwrap();
+
+        store
+            .execute(
+                "INSERT INTO drrp_annotations VALUES
+                    ('UK_ukpga_1974_37', 's.2(1)', 'duty', 'text1', 0.85,
+                     '2026-02-21T10:00:00Z', false, '2026-02-20T12:00:00Z'),
+                    ('UK_ukpga_1974_37', 's.7(a)', 'duty', 'text2', 0.80,
+                     '2026-02-21T10:00:00Z', false, '2026-02-21T12:00:00Z')",
+            )
+            .unwrap();
+
+        let last = store.get_last_sync_at().unwrap();
+        assert!(last.is_some());
+        let ts = last.unwrap();
+        assert!(
+            ts.contains("2026-02-21"),
+            "expected latest timestamp, got {ts}"
+        );
     }
 }

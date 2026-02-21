@@ -117,6 +117,28 @@ enum Command {
         #[arg(long, default_value_t = 1_000_000_000)]
         fuel: u64,
     },
+
+    /// Sync DRRP annotations and polished results with sertantai
+    Sync {
+        #[command(subcommand)]
+        action: SyncAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SyncAction {
+    /// Pull new annotations from sertantai outbox
+    Pull {
+        /// Sertantai base URL (e.g. http://localhost:4000)
+        #[arg(long, env = "SERTANTAI_URL")]
+        url: String,
+    },
+    /// Push polished results to sertantai inbox
+    Push {
+        /// Sertantai base URL (e.g. http://localhost:4000)
+        #[arg(long, env = "SERTANTAI_URL")]
+        url: String,
+    },
 }
 
 #[tokio::main]
@@ -166,7 +188,13 @@ async fn main() -> anyhow::Result<()> {
         Command::Tokenize { text, model_dir } => cmd_tokenize(&text, &model_dir),
 
         // WASM micro-app commands.
-        Command::Run { component, fuel } => cmd_run(&component, fuel).await,
+        Command::Run { component, fuel } => cmd_run(&data_dir, &component, fuel).await,
+
+        // Sync commands.
+        Command::Sync { action } => match action {
+            SyncAction::Pull { url } => cmd_sync_pull(&data_dir, &url).await,
+            SyncAction::Push { url } => cmd_sync_push(&data_dir, &url).await,
+        },
     }
 }
 
@@ -197,8 +225,24 @@ fn cmd_import(data_dir: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn cmd_run(component: &std::path::Path, fuel: u64) -> anyhow::Result<()> {
-    let result = fractalaw_host::run_component(component, fuel).await?;
+async fn cmd_run(
+    data_dir: &std::path::Path,
+    component: &std::path::Path,
+    fuel: u64,
+) -> anyhow::Result<()> {
+    let duck = open_duck(data_dir)?;
+
+    let inference = std::env::var("ANTHROPIC_API_KEY").ok().map(|key| {
+        let model = std::env::var("ANTHROPIC_MODEL")
+            .unwrap_or_else(|_| "claude-sonnet-4-5-20250929".into());
+        fractalaw_host::InferenceConfig::new(key, model)
+    });
+
+    let opts = fractalaw_host::RunOptions {
+        duck: Some(duck),
+        inference,
+    };
+    let result = fractalaw_host::run_component(component, fuel, opts).await?;
 
     match &result.output {
         Ok(msg) => println!("{msg}"),
@@ -219,6 +263,62 @@ async fn cmd_run(component: &std::path::Path, fuel: u64) -> anyhow::Result<()> {
     }
 
     println!("\nFuel consumed: {}", result.fuel_consumed);
+    Ok(())
+}
+
+async fn cmd_sync_pull(data_dir: &std::path::Path, url: &str) -> anyhow::Result<()> {
+    let duck = open_duck(data_dir)?;
+    duck.create_drrp_tables()?;
+
+    // Determine the `since` timestamp from the last sync.
+    let since = duck.get_last_sync_at()?;
+    if let Some(ref ts) = since {
+        eprintln!("Last sync: {ts}");
+    } else {
+        eprintln!("First sync — pulling all annotations");
+    }
+
+    let client = fractalaw_sync::SyncClient::new(url.to_string());
+    let since_dt = since
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+
+    let annotations = client.pull_annotations(since_dt).await?;
+
+    if annotations.is_empty() {
+        println!("No new annotations.");
+        return Ok(());
+    }
+
+    let count = duck.insert_annotations(&annotations)?;
+    println!("Pulled and stored {count} annotations.");
+    Ok(())
+}
+
+async fn cmd_sync_push(data_dir: &std::path::Path, url: &str) -> anyhow::Result<()> {
+    let duck = open_duck(data_dir)?;
+    duck.create_drrp_tables()?;
+
+    let entries = duck.get_unpushed_polished()?;
+    if entries.is_empty() {
+        println!("Nothing to push.");
+        return Ok(());
+    }
+
+    let client = fractalaw_sync::SyncClient::new(url.to_string());
+    let accepted = client.push_polished(&entries).await?;
+
+    // Mark each entry as pushed.
+    for entry in &entries {
+        duck.mark_pushed(&entry.law_name, &entry.provision)?;
+    }
+
+    println!(
+        "Pushed {} polished entries ({} accepted by server).",
+        entries.len(),
+        accepted
+    );
     Ok(())
 }
 

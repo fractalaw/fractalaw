@@ -28,6 +28,23 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.reqwest]
+workspace = true
+optional = true
+
+[dependencies.serde]
+workspace = true
+optional = true
+
+[dependencies.serde_json]
+workspace = true
+optional = true
+
+[dependencies.chrono]
+workspace = true
+optional = true
+
 [features]
 default = []
 flight = ["dep:arrow-flight", "dep:tonic", "dep:prost"]
+http = ["dep:reqwest", "dep:serde", "dep:serde_json", "dep:chrono"]

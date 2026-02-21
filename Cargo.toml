@@ -31,6 +31,9 @@ tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 wasmtime = { version = "41", features = ["component-model", "async"] }
 wasmtime-wasi = "41"
 
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
 # Networking / sync
 tonic = "0.13"
 prost = "0.13"
@@ -44,7 +47,7 @@ rustls = "0.23"
 ring = "0.17"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Date/time
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

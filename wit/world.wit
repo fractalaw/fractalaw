@@ -118,16 +118,16 @@ world micro-app {
     import audit-log;
 
     // Phase 3 Session 2: data host functions
-    // import data-query;
-    // import data-mutate;
+    import data-query;
+    import data-mutate;
 
     // Phase 3 Session 3: AI host functions
-    // import ai-embeddings;
+    import ai-embeddings;
     // import ai-classify;
 
     // Phase 3 Session 4: events + generative AI
     // import events-emit;
-    // import ai-inference;
+    import ai-inference;
 
     // Guest entry point
     export run: func() -> result<string, string>;

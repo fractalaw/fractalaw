@@ -8,7 +8,7 @@ repository.workspace = true
 
 [features]
 default = []
-duckdb = ["dep:duckdb"]
+duckdb = ["dep:duckdb", "dep:parquet"]
 lancedb = ["dep:lancedb", "dep:parquet", "dep:futures"]
 datafusion = ["dep:datafusion"]
 full = ["duckdb", "lancedb", "datafusion"]
@@ -25,7 +25,7 @@ parquet = { workspace = true, optional = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+tempfile = "3"
 tracing = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
