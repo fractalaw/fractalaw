@@ -1,6 +1,6 @@
 # Fractalaw — Project Status and Next Steps
 
-*Updated: 2026-02-20, after #3 (pre-tokenized text) completion*
+*Updated: 2026-02-21, after #13 (AI classification pipeline) completion*
 
 ## Current State
 
@@ -14,7 +14,9 @@ Phase 1 and Phase 2 are complete. The three-tier data architecture is fully oper
 
 All 97,522 legislation text rows have 384-dim `all-MiniLM-L6-v2` embeddings and pre-tokenized token IDs (100% coverage). Cross-store SQL queries work via DataFusion (FusionStore bridges DuckDB + LanceDB).
 
-### CLI (10 commands)
+The AI classification pipeline (#13) is complete. 452 laws with embeddings have been classified by domain, family, and subjects using centroid-based cosine similarity. Results are stored in `classified_*` columns on the legislation table with a `classification_status` field (`predicted`/`confirmed`/`conflict`) for queryable diffs against ground truth. Agreement rate: 74.6% (302 confirmed, 103 conflicts, 47 predicted-only).
+
+### CLI (11 commands)
 
 | Command | Path | Description |
 |---------|------|-------------|
@@ -24,10 +26,11 @@ All 97,522 legislation text rows have 384-dim `all-MiniLM-L6-v2` embeddings and 
 | `query <sql>` | DataFusion | Cross-store SQL |
 | `import` | DuckDB | (Re)import Parquet into persistent DuckDB |
 | `embed` | ONNX + LanceDB | Batch embedding + tokenization pipeline |
+| `classify` | ONNX + LanceDB + DuckDB | Centroid-based classification pipeline |
 | `text <name>` | LanceDB | Legislation sections by law |
 | `search "<query>"` | ONNX + LanceDB | Semantic similarity search |
 | `tokenize "text"` | ONNX model | Display token IDs and decoded tokens |
-| `validate` | All stores | 5-check data integrity suite |
+| `validate` | All stores | 9-check data integrity suite (incl. 4 classification checks) |
 
 ### Crate Status
 
@@ -35,8 +38,8 @@ All 97,522 legislation text rows have 384-dim `all-MiniLM-L6-v2` embeddings and 
 |-------|--------|-------|
 | `fractalaw-core` | Done | Arrow schemas, shared types |
 | `fractalaw-store` | Done | DuckDB + LanceDB + DataFusion |
-| `fractalaw-ai` | Done | ONNX embedder (all-MiniLM-L6-v2) |
-| `fractalaw-cli` | Done | 10 commands, wires all crates |
+| `fractalaw-ai` | Done | ONNX embedder + classifier (labels, centroids, classification) |
+| `fractalaw-cli` | Done | 11 commands, wires all crates |
 | `fractalaw-sync` | Placeholder | Arrow Flight / Lance delta sync / Loro CRDTs |
 | `fractalaw-host` | Placeholder | Wasmtime WASI Component Model runtime |
 
@@ -44,32 +47,43 @@ All 97,522 legislation text rows have 384-dim `all-MiniLM-L6-v2` embeddings and 
 
 | Issue | Title | Commit |
 |-------|-------|--------|
+| #13 | Centroid-based AI classification pipeline | `5c451b9` |
 | #11 | ONNX embeddings, semantic search, LanceDB integration | `e9ed54f` |
 | #9 | Eliminate CLI cold-start latency with persistent DuckDB | `021378c` |
 | #3 | Pre-tokenized text column in LAT | `13afdf8` |
 
-Classification pipeline (domain/family/sub_family) was split from #11 into #13.
-
 ## Priority Recommendation
 
-### 1st tier: Hot-path enrichment (#7, #8) — parked
+### 1st tier: Phase 3 — Wasmtime host runtime + first micro-apps
 
-- **#7 — Denormalize penalty provisions**: Extract penalty/fine data onto the hot path. Feeds future classification.
-- **#8 — Denormalize commencement status**: Add in-force/commenced status to legislation rows. Enriches the hot path with temporal validity.
+Phase 2 (AI integration) is complete. The approach is validated. Phase 3 is the MicroApp Runtime — building the Wasmtime host that lets WASM components use the data and AI infrastructure we've built.
 
-### 2nd tier: Issue #13 — AI classification pipeline
+See `.claude/plans/micro-apps.md` for the full brainstorm of 22 micro-app ideas across hub-side (AI refinement, batch processing), edge-side (field tools, offline search), and bridge (sync/transform) categories.
 
-Classify legislation text by domain/family/sub_family using the embedding vectors in LanceDB. Split from #11. Depends on #7 (penalty provisions) and #8 (commencement status) for full feature set.
+**Suggested session sequence:**
+
+1. **Wasmtime bootstrap** — Engine, pooling allocator, fuel metering, basic component loading. First host function: `fractal:audit/log`.
+2. **Data host functions** — `fractal:data/query` + `fractal:data/mutate` bridging to DataFusion/DuckDB/LanceDB. First real micro-app: Elixir-to-Fractalaw Bridge.
+3. **AI host functions** — `fractal:ai/embeddings` + `fractal:ai/classify` bridging to `fractalaw-ai`. Field Research Tool + Incident Classifier.
+4. **Generative AI + events** — `fractal:ai/inference` + `fractal:events/emit`. DRRP Polisher + Regulatory Change Monitor. Event-driven composition.
+5. **App Supervisor** — Registry, Lifecycle Manager, Router. Hot-swap. Fleet management.
+
+### 2nd tier: Parked (revisit after Phase 3)
+
+| Issue | Title | Notes |
+|-------|-------|-------|
+| #14 | Classification improvements | Approach validated at 74.6% agreement. Polish blocked on LAT data coverage — revisit when more text is ingested via the bridge. |
+| #7 | Denormalize penalty provisions | Would add structured features for future classifier improvements. |
+| #8 | Denormalize commencement status | Enriches hot path with temporal validity. |
+| #12 | regulation-importer micro-app | Reframed as sync bridge from sister Elixir app. Blocked on host runtime + Elixir pipeline completion. |
 
 ### 3rd tier: Phase 3+ (not yet)
 
 | Issue | Title | Phase | Blocker |
 |-------|-------|-------|---------|
-| #12 | WASM micro-app (regulation-importer) | Phase 3 | Needs `fractalaw-host` + WIT interfaces |
-| #4 | Evaluation context snapshots | Phase 3 | Needs AI classification pipeline |
+| #4 | Evaluation context snapshots | Phase 3 | Needs micro-app runtime producing evaluation contexts |
 | #6 | Authority precedence model | Phase 3 | Needs multi-jurisdiction data |
-| #13 | AI classification pipeline | Phase 2/3 | Needs #7, #8 |
-| #5 | Structured provenance graph | Phase 2/3 | Needs AI pipeline |
+| #5 | Structured provenance graph | Phase 2/3 | Needs classification + provenance data |
 | #1 | Bitmask feature flags | Phase 2+ | Needs real query patterns to emerge |
 | #10 | Multi-jurisdiction expansion | Phase 3+ | Needs non-UK data sources (EUR-Lex) |
 | #2 | Flat-pack compilation | Phase 4 | Needs sync infrastructure |
@@ -88,3 +102,4 @@ Classify legislation text by domain/family/sub_family using the embedding vector
 | 2026-02-20 | `02-20-26-phase2-lancedb-embeddings.md` | Phase 2: LanceDB, ONNX embeddings, semantic search, CLI commands (6 tasks) |
 | 2026-02-20 | `02-20-26-persistent-duckdb.md` | Issue #9: Persistent DuckDB, 8x speedup, `import` command (4 tasks) |
 | 2026-02-20 | `02-20-26-pre-tokenized-text.md` | Issue #3: Pre-tokenized text columns, `tokenize` command (5 tasks) |
+| 2026-02-20 | `02-20-26-ai-classification.md` | Issue #13: Centroid-based AI classification pipeline (6 tasks) |
