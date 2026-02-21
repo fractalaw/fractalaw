@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 fractalaw-store = { path = "../fractalaw-store", features = ["duckdb", "datafusion", "lancedb"] }
 fractalaw-ai = { path = "../fractalaw-ai", features = ["onnx"] }
+fractalaw-host = { path = "../fractalaw-host" }
 arrow = { workspace = true, features = ["prettyprint"] }
 clap = { workspace = true }
 tokio = { workspace = true }

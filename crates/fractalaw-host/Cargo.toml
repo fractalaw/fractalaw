@@ -12,6 +12,8 @@ fractalaw-store = { path = "../fractalaw-store" }
 fractalaw-ai = { path = "../fractalaw-ai" }
 arrow = { workspace = true }
 wasmtime = { workspace = true }
+wasmtime-wasi = { workspace = true }
+chrono = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

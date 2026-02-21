@@ -37,7 +37,7 @@ The `encode_batch` call produces `Encoding` objects with `get_ids()`, `get_atten
 
 ## Tasks
 
-### Task 1: Add `tokenize` and `tokenize_batch` to Embedder — [ ]
+### Task 1: Add `tokenize` and `tokenize_batch` to Embedder — [x]
 
 Expose the tokenizer as a public method, returning token ID lists without running ONNX inference.
 
@@ -70,7 +70,7 @@ impl Embedder {
 - Token count ≤ 256 for long text (truncation works)
 - Empty text returns `[CLS]` + `[SEP]` only (2 tokens)
 
-### Task 2: Add token columns to LAT schema — [ ]
+### Task 2: Add token columns to LAT schema — [x]
 
 Add two new columns to `legislation_text_schema()` in `fractalaw-core/src/schema.rs`:
 
@@ -88,7 +88,7 @@ Update the schema field count test from 28 to 30.
 
 **Placement**: After section 3.5 (Embeddings), before 3.6 (Migration) — renumber downstream sections.
 
-### Task 3: Add tokenization to the embed pipeline — [ ]
+### Task 3: Add tokenization to the embed pipeline — [x]
 
 Extend `embed.rs` to populate `token_ids` and `tokenizer_model` alongside embeddings.
 
@@ -99,7 +99,7 @@ Extend `embed.rs` to populate `token_ids` and `tokenizer_model` alongside embedd
 
 The tokenize step is essentially free compared to ONNX inference (~0.1ms vs ~1ms per text), so adding it to the existing pipeline has negligible performance impact.
 
-### Task 4: Add `fractalaw tokenize` CLI command (optional) — [ ]
+### Task 4: Add `fractalaw tokenize` CLI command — [x]
 
 Standalone tokenization command for inspection/debugging:
 
@@ -109,7 +109,7 @@ fractalaw tokenize "Health and safety at work"
 
 Outputs token IDs and decoded tokens. Useful for verifying tokenization and vocabulary coverage.
 
-### Task 5: Validation — [ ]
+### Task 5: Validation — [x]
 
 - Schema field count test: 28 → 30
 - `fractalaw embed` produces non-null `token_ids` for all rows
@@ -139,8 +139,36 @@ Tokenize during the embed pipeline (Task 3), not as a separate pass. The tokeniz
 
 | Task | Status | Commit | Notes |
 |------|--------|--------|-------|
-| 1. `tokenize`/`tokenize_batch` | [ ] | | |
-| 2. Schema columns | [ ] | | |
-| 3. Embed pipeline | [ ] | | |
-| 4. CLI `tokenize` command | [ ] | | |
-| 5. Validation | [ ] | | |
+| 1. `tokenize`/`tokenize_batch` | [x] | `13afdf8` | 7 new methods/tests: tokenize, tokenize_batch, id_to_token, model_name |
+| 2. Schema columns | [x] | `13afdf8` | 28 → 30 fields: token_ids (List<UInt32>), tokenizer_model (Utf8) |
+| 3. Embed pipeline | [x] | `13afdf8` | Tokenizes alongside embedding; fixed ListBuilder non-null inner field |
+| 4. CLI `tokenize` command | [x] | `13afdf8` | `fractalaw tokenize "text"` — displays index, ID, decoded token |
+| 5. Validation | [x] | `13afdf8` | 5th check: token coverage 97,522/97,522 (100%); 83 workspace tests pass |
+
+## Session Complete
+
+All 5 tasks done. Issue #3 shipped in commit `13afdf8`, pushed to `origin/master`.
+
+### What Changed
+
+| File | Changes |
+|------|---------|
+| `crates/fractalaw-ai/src/embedder.rs` | Added `model_name` field, `tokenize()`, `tokenize_batch()`, `id_to_token()`, `model_name()`; 7 new tests |
+| `crates/fractalaw-core/src/schema.rs` | Added `token_ids: List<UInt32>` and `tokenizer_model: Utf8` to LAT schema (section 3.6); field count 28 → 30 |
+| `crates/fractalaw-cli/src/embed.rs` | Added `ListBuilder`/`UInt32Builder` imports; tokenizes in batch loop; inserts token columns into output schema and batches |
+| `crates/fractalaw-cli/src/main.rs` | Added `Tokenize` command + `cmd_tokenize()`; added token coverage check to validate (4 → 5 checks) |
+
+### CLI Commands (10 total)
+
+| Command | Store | Description |
+|---------|-------|-------------|
+| `stats` | DuckDB | Dataset summary |
+| `law <name>` | DuckDB | Single law card + edges |
+| `graph <name>` | DuckDB | Multi-hop traversal |
+| `query <sql>` | DataFusion | Cross-store SQL |
+| `import` | DuckDB | (Re)import Parquet into persistent DuckDB |
+| `embed` | ONNX + LanceDB | Batch embedding + tokenization pipeline |
+| `text <name>` | LanceDB | Legislation sections by law |
+| `search "<query>"` | ONNX + LanceDB | Semantic similarity search |
+| `tokenize "text"` | ONNX model | Display token IDs and decoded tokens |
+| `validate` | All stores | 5-check data integrity suite |

@@ -107,6 +107,16 @@ enum Command {
 
     /// Import (or re-import) Parquet files into persistent DuckDB
     Import,
+
+    /// Load and execute a WASM micro-app component
+    Run {
+        /// Path to the .wasm component file
+        component: PathBuf,
+
+        /// Fuel budget (default: 1 billion = standard tier)
+        #[arg(long, default_value_t = 1_000_000_000)]
+        fuel: u64,
+    },
 }
 
 #[tokio::main]
@@ -154,6 +164,9 @@ async fn main() -> anyhow::Result<()> {
 
         // Model-only commands — no data store needed.
         Command::Tokenize { text, model_dir } => cmd_tokenize(&text, &model_dir),
+
+        // WASM micro-app commands.
+        Command::Run { component, fuel } => cmd_run(&component, fuel).await,
     }
 }
 
@@ -181,6 +194,31 @@ fn cmd_import(data_dir: &std::path::Path) -> anyhow::Result<()> {
         fmt_num(store.legislation_count()?),
         fmt_num(store.law_edges_count()?),
     );
+    Ok(())
+}
+
+async fn cmd_run(component: &std::path::Path, fuel: u64) -> anyhow::Result<()> {
+    let result = fractalaw_host::run_component(component, fuel).await?;
+
+    match &result.output {
+        Ok(msg) => println!("{msg}"),
+        Err(err) => eprintln!("Guest error: {err}"),
+    }
+
+    if !result.audit_entries.is_empty() {
+        println!(
+            "\n--- Audit Trail ({} entries) ---",
+            result.audit_entries.len()
+        );
+        for entry in &result.audit_entries {
+            println!(
+                "  [{}] {} — {}",
+                entry.event_type, entry.resource, entry.detail
+            );
+        }
+    }
+
+    println!("\nFuel consumed: {}", result.fuel_consumed);
     Ok(())
 }
 

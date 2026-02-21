@@ -1,0 +1,134 @@
+package fractal:app@0.1.0;
+
+// --- Audit ---
+
+interface audit-log {
+    record audit-entry {
+        event-type: string,
+        %resource: string,
+        detail: string,
+    }
+
+    record-event: func(entry: audit-entry);
+}
+
+// --- Data (Phase 3 Session 2) ---
+
+interface data-query {
+    record query-error {
+        code: u32,
+        message: string,
+    }
+
+    query: func(sql: string) -> result<list<u8>, query-error>;
+}
+
+interface data-mutate {
+    record mutate-error {
+        code: u32,
+        message: string,
+    }
+
+    insert: func(table: string, data: list<u8>) -> result<u64, mutate-error>;
+    execute: func(sql: string) -> result<u64, mutate-error>;
+}
+
+// --- AI (Phase 3 Session 3) ---
+
+interface ai-embeddings {
+    record ai-error {
+        code: u32,
+        message: string,
+    }
+
+    embed: func(text: string) -> result<list<f32>, ai-error>;
+    embed-batch: func(texts: list<string>) -> result<list<list<f32>>, ai-error>;
+}
+
+interface ai-classify {
+    use ai-embeddings.{ai-error};
+
+    record classification {
+        category: string,
+        score: f32,
+    }
+
+    classify: func(text: string, categories: list<string>) -> result<list<classification>, ai-error>;
+}
+
+interface ai-inference {
+    use ai-embeddings.{ai-error};
+
+    record generate-request {
+        system-prompt: option<string>,
+        user-prompt: string,
+        max-tokens: u32,
+        temperature: f32,
+    }
+
+    record generate-response {
+        text: string,
+        tokens-used: u32,
+        confidence: f32,
+    }
+
+    generate: func(request: generate-request) -> result<generate-response, ai-error>;
+}
+
+// --- Events (Phase 3 Session 4) ---
+
+interface events-emit {
+    record event-error {
+        code: u32,
+        message: string,
+    }
+
+    record domain-event {
+        event-type: string,
+        payload: list<u8>,
+        source-app: string,
+    }
+
+    type event-id = u64;
+
+    emit: func(event: domain-event) -> result<event-id, event-error>;
+}
+
+interface events-schedule {
+    use events-emit.{event-error};
+
+    record scheduled-task {
+        name: string,
+        cron: option<string>,
+        run-at: option<u64>,
+        target-app: string,
+        payload: list<u8>,
+    }
+
+    type task-id = u64;
+
+    schedule: func(task: scheduled-task) -> result<task-id, event-error>;
+    cancel: func(id: task-id) -> result<_, event-error>;
+}
+
+// --- World ---
+
+world micro-app {
+    // Phase 3 Session 1: implemented
+    import audit-log;
+
+    // Phase 3 Session 2: data host functions
+    // import data-query;
+    // import data-mutate;
+
+    // Phase 3 Session 3: AI host functions
+    // import ai-embeddings;
+    // import ai-classify;
+
+    // Phase 3 Session 4: events + generative AI
+    // import events-emit;
+    // import ai-inference;
+
+    // Guest entry point
+    export run: func() -> result<string, string>;
+}

@@ -377,3 +377,52 @@ The centroid-based approach works purely from embeddings, so #7 and #8 are not b
 - **47 predicted** (10%) — no ground truth, AI-only classification
 - **Mean family confidence: 0.859**
 - **24 family centroids**, 3 domain centroids, 141 subject centroids
+
+### Task 6 Validation Results
+
+```
+=== Validation ===
+
+  [PASS] Legislation text rows: 97,522
+  [PASS] Embedding coverage: 97,522 / 97,522 (100%)
+  [PASS] Token coverage: 97,522 / 97,522 (100%)
+  [PASS] Cross-store join: 405 / 452 laws matched (47 unmatched in legislation)
+  [PASS] Semantic search: "chemical exposure limits" → UK_nisr_2003_34
+
+  --- Classification ---
+  [PASS] Classification coverage: 405 / 19,318 laws (2.1%)
+  [PASS] Confidence distribution: mean=0.863, median=0.878, p10=0.763
+  [PASS] Ground-truth agreement: 302 / 405 (74.6%)
+  [PASS] Subject revival: 121 / 6,358 post-2013 laws have predicted subjects
+
+=== 9/9 checks passed ===
+```
+
+## Session Closed
+
+**Commit**: `5c451b9` — Implement centroid-based AI classification pipeline (#13)
+
+**What was built**:
+
+| File | Lines | Description |
+|------|-------|-------------|
+| `crates/fractalaw-ai/src/labels.rs` | 470 | Ground-truth label extraction (LabelSet) with 9 tests |
+| `crates/fractalaw-ai/src/classifier.rs` | 774 | Centroid computation, classification, status tracking with 14 tests |
+| `crates/fractalaw-ai/src/lib.rs` | +7 | Module exports |
+| `crates/fractalaw-core/src/schema.rs` | +68 | 7 classification columns (section 1.13) with 3 tests |
+| `crates/fractalaw-store/src/duck.rs` | +8 | `execute()` method for DDL/DML |
+| `crates/fractalaw-cli/src/main.rs` | +379 | `classify` command + 4 validation checks + helpers |
+
+**Key decisions**:
+- Classification is **per-law** (not per-section) — section embeddings are mean-pooled to law-level
+- `family`/`sub_family` are **single-select**; `domain`/`subjects` are **multi-select**
+- AI predictions stored in `classified_*` columns — never overwrites ground-truth `domain`/`family`/`subjects`
+- `classification_status` enables queryable diffs: `predicted` / `confirmed` / `conflict`
+- Labels come only from the legislation table (not CSV re-parsing)
+
+**Observations for future work**:
+- 74.6% agreement rate suggests the centroid approach works but has room for improvement
+- Only 452/19,318 laws have embeddings — expanding text coverage would dramatically increase classification reach
+- 103 conflicts are reviewable via `SELECT ... WHERE classification_status = 'conflict'`
+- Common conflict patterns: Climate Change ↔ Energy, Fire/Dangerous ↔ Consumer Product Safety, Planning ↔ Historic Environment
+- Subject revival gave 121 post-2013 laws predicted subjects — modest but useful

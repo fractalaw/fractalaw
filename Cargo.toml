@@ -28,7 +28,8 @@ ort = "2.0.0-rc.11"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 
 # WebAssembly host (pure Rust + Cranelift)
-wasmtime = { version = "29", features = ["component-model", "async"] }
+wasmtime = { version = "41", features = ["component-model", "async"] }
+wasmtime-wasi = "41"
 
 # Networking / sync
 tonic = "0.13"
@@ -44,6 +45,9 @@ ring = "0.17"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
+
+# Date/time
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # Serialisation
 serde = { version = "1", features = ["derive"] }

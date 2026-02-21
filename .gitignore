@@ -1,3 +1,6 @@
 /target
+guests/*/target
 /models
+/data
+.zed
 nohup.out
